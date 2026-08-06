@@ -152,13 +152,15 @@ export default function MaterialCenter({
   }, [request, runnerOnline, showToast, status?.connected]);
 
   useEffect(() => {
-    void loadStatus();
+    const timer = window.setTimeout(() => void loadStatus(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadStatus]);
 
   useEffect(() => {
     if (!status?.connected) return;
-    void loadFiles(remotePath || status.rootPath || "/");
+    const timer = window.setTimeout(() => void loadFiles(remotePath || status.rootPath || "/"), 0);
     // The first successful connection should immediately show its root directory.
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.connected]);
 

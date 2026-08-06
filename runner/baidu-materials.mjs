@@ -241,6 +241,9 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
   async function list(remoteDir = configuredRoot) {
     const accessToken = await ensureToken();
     const dir = normalizeRemotePath(remoteDir, configuredRoot);
+    if (configuredRoot !== "/" && dir !== configuredRoot && !dir.startsWith(`${configuredRoot}/`)) {
+      throw new Error("只能浏览已配置的百度网盘素材根目录");
+    }
     const listUrl = new URL("https://pan.baidu.com/rest/2.0/xpan/file");
     listUrl.searchParams.set("method", "list");
     listUrl.searchParams.set("access_token", accessToken);

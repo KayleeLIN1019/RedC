@@ -413,39 +413,48 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    refreshRunner();
+    const initial = window.setTimeout(refreshRunner, 0);
     const timer = window.setInterval(refreshRunner, 8000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [refreshRunner]);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem("rednote-drafts");
-    if (!saved) return;
-    try {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) setDrafts(parsed);
-    } catch {
-      window.localStorage.removeItem("rednote-drafts");
-    }
+    const timer = window.setTimeout(() => {
+      const saved = window.localStorage.getItem("rednote-drafts");
+      if (!saved) return;
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setDrafts(parsed);
+      } catch {
+        window.localStorage.removeItem("rednote-drafts");
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
-    const savedContent = window.localStorage.getItem("rednote-content-items");
-    const savedCompetitors = window.localStorage.getItem("rednote-competitors");
-    try {
-      if (savedContent) {
-        const parsedContent = JSON.parse(savedContent);
-        if (Array.isArray(parsedContent)) setContentItems(parsedContent);
-      }
-      if (savedCompetitors) {
-        const parsedCompetitors = JSON.parse(savedCompetitors);
-        if (parsedCompetitors?.feed && parsedCompetitors?.ip) {
-          setCompetitors(normalizeCompetitorData(parsedCompetitors));
+    const timer = window.setTimeout(() => {
+      const savedContent = window.localStorage.getItem("rednote-content-items");
+      const savedCompetitors = window.localStorage.getItem("rednote-competitors");
+      try {
+        if (savedContent) {
+          const parsedContent = JSON.parse(savedContent);
+          if (Array.isArray(parsedContent)) setContentItems(parsedContent);
         }
+        if (savedCompetitors) {
+          const parsedCompetitors = JSON.parse(savedCompetitors);
+          if (parsedCompetitors?.feed && parsedCompetitors?.ip) {
+            setCompetitors(normalizeCompetitorData(parsedCompetitors));
+          }
+        }
+      } catch {
+        showToast("部分本地数据无法读取，已使用默认内容");
       }
-    } catch {
-      showToast("部分本地数据无法读取，已使用默认内容");
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [showToast]);
 
   useEffect(() => {
@@ -461,13 +470,16 @@ export default function Home() {
   }, [competitors]);
 
   useEffect(() => {
-    const first = contentItems.find((item) => item.business === business);
-    if (first) setSelectedContentId(first.id);
-    setPublishForm((current) => ({
-      ...current,
-      accountId: business === "feed" ? "feed-a" : "ip-yintang",
-    }));
-    setDraftEditor((current) => current.business === business ? current : newDraft(business));
+    const timer = window.setTimeout(() => {
+      const first = contentItems.find((item) => item.business === business);
+      if (first) setSelectedContentId(first.id);
+      setPublishForm((current) => ({
+        ...current,
+        accountId: business === "feed" ? "feed-a" : "ip-yintang",
+      }));
+      setDraftEditor((current) => current.business === business ? current : newDraft(business));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [business, contentItems]);
 
   const currentAccounts = accounts.filter((item) => item.business === business);
