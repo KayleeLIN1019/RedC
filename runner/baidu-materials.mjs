@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
+import bundledFfmpeg from "ffmpeg-static";
 
 const execFileAsync = promisify(execFile);
 const imageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".heif"]);
@@ -65,6 +66,12 @@ function normalizeRemotePath(value, fallback = "/") {
   return normalized === "." ? "/" : normalized;
 }
 
+function uniqueStrings(values, maxLength = 40, maxItems = 30) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim().slice(0, maxLength))
+    .filter(Boolean))].slice(0, maxItems);
+}
+
 export function createBaiduMaterialService({ runnerDir, port, getState, saveState, logEvent }) {
   const cacheDir = path.resolve(process.env.MATERIAL_CACHE_DIR || path.join(runnerDir, "data", "material-cache"));
   const cacheLimitGb = Math.max(1, Number(process.env.MATERIAL_CACHE_MAX_GB || 80));
@@ -73,7 +80,9 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
   const redirectUri = process.env.BAIDU_PAN_REDIRECT_URI || `http://127.0.0.1:${port}/api/materials/baidu/callback`;
   const configuredRoot = normalizeRemotePath(process.env.BAIDU_PAN_ROOT_PATH || "/");
   const cacheJobs = new Set();
+  const folderImportJobs = new Set();
   let ffmpegAvailable = false;
+  let ffmpegExecutable = "";
 
   function materialState() {
     const state = getState();
@@ -87,18 +96,64 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
       connectedAt: "",
     };
     state.materials.cache ||= [];
+    state.materials.organizer ||= {
+      folders: [
+        { id: "inbox", name: "待整理", color: "#78889e", parentId: "", createdAt: new Date().toISOString() },
+        { id: "cover", name: "封面候选", color: "#9b745f", parentId: "", createdAt: new Date().toISOString() },
+        { id: "featured", name: "精选素材", color: "#5f876f", parentId: "", createdAt: new Date().toISOString() },
+      ],
+      items: [],
+      moveHistory: [],
+      folderImports: [],
+    };
+    state.materials.organizer.folders ||= [];
+    state.materials.organizer.items ||= [];
+    state.materials.organizer.moveHistory ||= [];
+    state.materials.organizer.folderImports ||= [];
+    for (const folder of state.materials.organizer.folders) folder.parentId ||= "";
     return state.materials;
+  }
+
+  function organizerState() {
+    return materialState().organizer;
+  }
+
+  function isInsideConfiguredRoot(remotePath) {
+    const normalized = normalizeRemotePath(remotePath);
+    return configuredRoot === "/" || normalized === configuredRoot || normalized.startsWith(`${configuredRoot}/`);
+  }
+
+  function publicOrganizer() {
+    const organizer = organizerState();
+    return {
+      folders: organizer.folders,
+      items: organizer.items,
+      tags: [...new Set(organizer.items.flatMap((item) => item.tags || []))].sort((a, b) => a.localeCompare(b, "zh-CN")),
+      moveHistory: organizer.moveHistory.slice(0, 30),
+      folderImports: organizer.folderImports.slice(0, 20),
+    };
   }
 
   async function ready() {
     await fs.mkdir(cacheDir, { recursive: true });
     materialState();
     await saveState();
-    try {
-      await execFileAsync("ffmpeg", ["-version"], { timeout: 5000 });
-      ffmpegAvailable = true;
-    } catch {
-      ffmpegAvailable = false;
+    const candidates = [...new Set([process.env.FFMPEG_PATH, bundledFfmpeg, "ffmpeg"].filter(Boolean))];
+    ffmpegAvailable = false;
+    ffmpegExecutable = "";
+    for (const candidate of candidates) {
+      try {
+        await execFileAsync(candidate, ["-version"], { timeout: 5000 });
+        ffmpegExecutable = candidate;
+        ffmpegAvailable = true;
+        break;
+      } catch {
+        // Continue to the next source: explicit path, bundled binary, then system PATH.
+      }
+    }
+    for (const job of organizerState().folderImports.filter((item) => ["queued", "running"].includes(item.status))) {
+      job.status = "queued";
+      void runFolderImport(job);
     }
   }
 
@@ -149,6 +204,24 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
       headers: { "User-Agent": "pan.baidu.com" },
     });
     const payload = await response.json().catch(() => ({}));
+    const error = baiduErrorMessage(payload, fallback);
+    if (!response.ok || error) throw new Error(error || fallback);
+    return payload;
+  }
+
+  async function baiduForm(url, form, fallback, allowedErrnos = []) {
+    const response = await fetch(url, {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "pan.baidu.com",
+      },
+      body: new URLSearchParams(form),
+    });
+    const payload = await response.json().catch(() => ({}));
+    const code = Number(payload.errno ?? 0);
+    if (response.ok && allowedErrnos.includes(code)) return payload;
     const error = baiduErrorMessage(payload, fallback);
     if (!response.ok || error) throw new Error(error || fallback);
     return payload;
@@ -238,8 +311,7 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
     };
   }
 
-  async function list(remoteDir = configuredRoot) {
-    const accessToken = await ensureToken();
+  async function remoteDirectoryPage(remoteDir, accessToken, start = 0) {
     const dir = normalizeRemotePath(remoteDir, configuredRoot);
     if (configuredRoot !== "/" && dir !== configuredRoot && !dir.startsWith(`${configuredRoot}/`)) {
       throw new Error("只能浏览已配置的百度网盘素材根目录");
@@ -248,17 +320,24 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
     listUrl.searchParams.set("method", "list");
     listUrl.searchParams.set("access_token", accessToken);
     listUrl.searchParams.set("dir", dir);
-    listUrl.searchParams.set("start", "0");
+    listUrl.searchParams.set("start", String(start));
     listUrl.searchParams.set("limit", "1000");
     listUrl.searchParams.set("order", "time");
     listUrl.searchParams.set("desc", "1");
     listUrl.searchParams.set("web", "1");
-    const payload = await baiduJson(listUrl, "无法读取百度网盘素材目录");
+    return { dir, payload: await baiduJson(listUrl, "无法读取百度网盘素材目录") };
+  }
+
+  async function list(remoteDir = configuredRoot) {
+    const accessToken = await ensureToken();
+    const { dir, payload } = await remoteDirectoryPage(remoteDir, accessToken);
     const cachedByFsId = new Map(materialState().cache.filter((item) => item.fsId).map((item) => [String(item.fsId), item]));
+    const organizedByFsId = new Map(organizerState().items.map((item) => [String(item.fsId), item]));
     const files = (payload.list || []).map((item) => {
       const fsId = String(item.fs_id || "");
       const mediaType = item.isdir ? "folder" : mediaTypeOf(item.server_filename, item.category);
       const cached = cachedByFsId.get(fsId);
+      const organized = organizedByFsId.get(fsId);
       return {
         fsId,
         name: item.server_filename,
@@ -271,9 +350,304 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
         cacheId: cached?.id || "",
         cacheStatus: cached?.status || "",
         localPath: cached?.status === "cached" ? cached.localPath : "",
+        folderIds: organized?.folderIds || [],
+        tags: organized?.tags || [],
       };
     });
     return { dir, files };
+  }
+
+  async function organizer() {
+    return publicOrganizer();
+  }
+
+  async function createVirtualFolder(folderName, parentFolderId = "") {
+    const name = String(folderName || "").trim();
+    if (!name) throw new Error("请输入素材夹名称");
+    if (name.length > 40) throw new Error("素材夹名称不能超过 40 个字");
+    const organizer = organizerState();
+    const parentId = String(parentFolderId || "");
+    if (parentId) {
+      const parent = organizer.folders.find((folder) => folder.id === parentId);
+      if (!parent) throw new Error("上级虚拟素材夹不存在");
+      if (parent.parentId) throw new Error("目前最多支持两级虚拟素材夹");
+    }
+    if (organizer.folders.some((folder) => folder.parentId === parentId && folder.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("同一级中已经有同名的虚拟素材夹");
+    }
+    const colors = ["#657a91", "#8a6f91", "#9b745f", "#5f876f", "#9a8558"];
+    const folder = {
+      id: crypto.randomUUID(),
+      name,
+      color: colors[organizer.folders.length % colors.length],
+      parentId,
+      createdAt: new Date().toISOString(),
+    };
+    organizer.folders.push(folder);
+    await saveState();
+    await logEvent("material-folder-created", `已创建虚拟素材夹：${name}`, { folderId: folder.id, parentId });
+    return folder;
+  }
+
+  async function organize(items, folderIds, tags) {
+    if (!Array.isArray(items) || items.length === 0) throw new Error("请先勾选要归类的素材");
+    if (items.length > 200) throw new Error("单次最多归类 200 个素材");
+    const organizer = organizerState();
+    const validFolderIds = new Set(organizer.folders.map((folder) => folder.id));
+    const normalizedFolderIds = uniqueStrings(folderIds, 80, 30).filter((id) => validFolderIds.has(id));
+    const normalizedTags = uniqueStrings(tags, 20, 20);
+    if (normalizedFolderIds.length === 0 && normalizedTags.length === 0) throw new Error("请选择虚拟素材夹或添加标签");
+    const now = new Date().toISOString();
+    const changed = [];
+    for (const payload of items) {
+      const fsId = String(payload.fsId || "");
+      if (!/^\d+$/.test(fsId) || payload.isDir) continue;
+      const remotePath = normalizeRemotePath(payload.path);
+      if (!isInsideConfiguredRoot(remotePath)) throw new Error("只能归类已配置素材根目录中的文件");
+      const mediaType = mediaTypeOf(payload.name, payload.category);
+      if (!["image", "video"].includes(mediaType)) continue;
+      let record = organizer.items.find((item) => String(item.fsId) === fsId);
+      if (!record) {
+        record = {
+          fsId,
+          name: safeFileName(payload.name),
+          path: remotePath,
+          isDir: false,
+          size: Number(payload.size || 0),
+          modifiedAt: Number(payload.modifiedAt || 0),
+          mediaType,
+          category: Number(payload.category || 0),
+          folderIds: [],
+          tags: [],
+          addedAt: now,
+          updatedAt: now,
+        };
+        organizer.items.unshift(record);
+      }
+      record.name = safeFileName(payload.name || record.name);
+      record.path = remotePath;
+      record.size = Number(payload.size || record.size || 0);
+      record.modifiedAt = Number(payload.modifiedAt || record.modifiedAt || 0);
+      record.mediaType = mediaType;
+      record.category = Number(payload.category || record.category || 0);
+      record.folderIds = uniqueStrings([...(record.folderIds || []), ...normalizedFolderIds], 80, 30);
+      record.tags = uniqueStrings([...(record.tags || []), ...normalizedTags], 20, 20);
+      record.updatedAt = now;
+      changed.push(record);
+    }
+    if (changed.length === 0) throw new Error("勾选内容中没有可归类的图片或视频");
+    await saveState();
+    await logEvent("materials-organized", `已归类 ${changed.length} 个素材`, {
+      fsIds: changed.map((item) => item.fsId),
+      folderIds: normalizedFolderIds,
+      tags: normalizedTags,
+      remoteKept: true,
+    });
+    return { items: changed, organizer: publicOrganizer() };
+  }
+
+  async function runFolderImport(job) {
+    if (folderImportJobs.has(job.id)) return;
+    folderImportJobs.add(job.id);
+    job.status = "running";
+    job.error = "";
+    job.updatedAt = new Date().toISOString();
+    await saveState();
+    try {
+      const accessToken = await ensureToken();
+      const pendingDirectories = [job.sourcePath];
+      const visited = new Set();
+      let batch = [];
+      while (pendingDirectories.length) {
+        const currentDir = pendingDirectories.shift();
+        if (visited.has(currentDir)) continue;
+        visited.add(currentDir);
+        if (visited.size > 5000) throw new Error("文件夹层级或数量过多，已停止继续扫描");
+        let start = 0;
+        while (true) {
+          const { payload } = await remoteDirectoryPage(currentDir, accessToken, start);
+          const entries = Array.isArray(payload.list) ? payload.list : [];
+          for (const entry of entries) {
+            if (entry.isdir) {
+              pendingDirectories.push(normalizeRemotePath(entry.path));
+              continue;
+            }
+            const mediaType = mediaTypeOf(entry.server_filename, entry.category);
+            if (!["image", "video"].includes(mediaType)) continue;
+            job.discovered += 1;
+            if (job.discovered > 50_000) throw new Error("单个文件夹最多自动归类 50,000 个图片或视频");
+            batch.push({
+              fsId: String(entry.fs_id || ""),
+              name: entry.server_filename,
+              path: entry.path,
+              isDir: false,
+              size: Number(entry.size || 0),
+              modifiedAt: Number(entry.server_mtime || entry.local_mtime || 0) * 1000,
+              mediaType,
+              category: Number(entry.category || 0),
+            });
+            if (batch.length === 200) {
+              const result = await organize(batch, [job.targetFolderId], []);
+              job.added += result.items.length;
+              batch = [];
+              job.updatedAt = new Date().toISOString();
+            }
+          }
+          if (entries.length < 1000 || payload.has_more === 0 || payload.has_more === false) break;
+          start += entries.length;
+        }
+        job.foldersScanned = visited.size;
+        job.updatedAt = new Date().toISOString();
+        await saveState();
+      }
+      if (batch.length) {
+        const result = await organize(batch, [job.targetFolderId], []);
+        job.added += result.items.length;
+      }
+      job.status = "completed";
+      job.completedAt = new Date().toISOString();
+      job.updatedAt = job.completedAt;
+      await logEvent("material-folder-imported", `已从百度网盘文件夹归类 ${job.added} 个素材`, {
+        jobId: job.id,
+        sourcePath: job.sourcePath,
+        targetFolderId: job.targetFolderId,
+        remoteKept: true,
+      });
+    } catch (error) {
+      job.status = "failed";
+      job.error = error instanceof Error ? error.message : String(error);
+      job.updatedAt = new Date().toISOString();
+      await logEvent("material-folder-import-failed", `百度网盘文件夹归类未完成：${job.error}`, {
+        jobId: job.id,
+        sourcePath: job.sourcePath,
+        targetFolderId: job.targetFolderId,
+        added: job.added,
+      });
+    } finally {
+      folderImportJobs.delete(job.id);
+      await saveState();
+    }
+  }
+
+  async function queueFolderImport(sourcePathInput, sourceNameInput, targetFolderIdInput) {
+    const sourcePath = normalizeRemotePath(sourcePathInput);
+    if (!isInsideConfiguredRoot(sourcePath)) throw new Error("只能拖入已配置素材根目录中的百度网盘文件夹");
+    const targetFolderId = String(targetFolderIdInput || "");
+    const organizer = organizerState();
+    const targetFolder = organizer.folders.find((folder) => folder.id === targetFolderId);
+    if (!targetFolder) throw new Error("目标虚拟素材夹不存在");
+    if (organizer.folderImports.some((item) => item.sourcePath === sourcePath && item.targetFolderId === targetFolderId && ["queued", "running"].includes(item.status))) {
+      throw new Error("这个百度网盘文件夹正在归类到该素材夹");
+    }
+    await ensureToken();
+    const now = new Date().toISOString();
+    const job = {
+      id: crypto.randomUUID(),
+      sourcePath,
+      sourceName: safeFileName(sourceNameInput || path.posix.basename(sourcePath)),
+      targetFolderId,
+      targetFolderName: targetFolder.name,
+      status: "queued",
+      discovered: 0,
+      added: 0,
+      foldersScanned: 0,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: "",
+      error: "",
+    };
+    organizer.folderImports.unshift(job);
+    organizer.folderImports = organizer.folderImports.slice(0, 100);
+    await saveState();
+    await logEvent("material-folder-import-queued", `开始整理百度网盘文件夹：${job.sourceName}`, {
+      jobId: job.id,
+      sourcePath,
+      targetFolderId,
+      remoteKept: true,
+    });
+    void runFolderImport(job);
+    return job;
+  }
+
+  async function createRemoteFolder(destination, accessToken) {
+    const createUrl = new URL("https://pan.baidu.com/rest/2.0/xpan/file");
+    createUrl.searchParams.set("method", "create");
+    createUrl.searchParams.set("access_token", accessToken);
+    return baiduForm(createUrl, {
+      path: destination,
+      size: "0",
+      isdir: "1",
+      rtype: "1",
+      block_list: "[]",
+    }, "无法创建百度网盘目标文件夹", [-8]);
+  }
+
+  async function moveRemoteItems(items, destinationInput, confirmed = false) {
+    if (!confirmed) throw new Error("移动百度网盘原件前需要再次确认");
+    if (!Array.isArray(items) || items.length === 0) throw new Error("请先勾选要移动的素材");
+    if (items.length > 50) throw new Error("为保证安全，单次最多移动 50 个百度网盘原件");
+    const destination = normalizeRemotePath(destinationInput);
+    if (!isInsideConfiguredRoot(destination)) throw new Error("目标文件夹必须位于已配置的百度网盘素材根目录内");
+    const moveItems = items.map((item) => {
+      const sourcePath = normalizeRemotePath(item.path);
+      if (!/^\d+$/.test(String(item.fsId || "")) || item.isDir) throw new Error("只能移动已勾选的图片或视频原件");
+      if (!isInsideConfiguredRoot(sourcePath)) throw new Error("只能移动已配置素材根目录中的文件");
+      const mediaType = mediaTypeOf(item.name, item.category);
+      if (!["image", "video"].includes(mediaType)) throw new Error("只能移动图片或视频素材");
+      return {
+        fsId: String(item.fsId),
+        name: safeFileName(item.name || path.posix.basename(sourcePath)),
+        sourcePath,
+      };
+    });
+    if (moveItems.some((item) => path.posix.dirname(item.sourcePath) === destination)) {
+      throw new Error("部分素材已经在目标文件夹中，请更换目标文件夹");
+    }
+    const accessToken = await ensureToken();
+    await createRemoteFolder(destination, accessToken);
+    const moveUrl = new URL("https://pan.baidu.com/rest/2.0/xpan/file");
+    moveUrl.searchParams.set("method", "filemanager");
+    moveUrl.searchParams.set("access_token", accessToken);
+    moveUrl.searchParams.set("opera", "move");
+    const payload = await baiduForm(moveUrl, {
+      async: "0",
+      ondup: "fail",
+      filelist: JSON.stringify(moveItems.map((item) => ({
+        path: item.sourcePath,
+        dest: destination,
+        newname: item.name,
+      }))),
+    }, "移动百度网盘原件失败");
+    const movedAt = new Date().toISOString();
+    const organizer = organizerState();
+    const moved = moveItems.map((item) => {
+      const destinationPath = normalizeRemotePath(path.posix.join(destination, item.name));
+      const record = organizer.items.find((candidate) => String(candidate.fsId) === item.fsId);
+      if (record) {
+        record.path = destinationPath;
+        record.updatedAt = movedAt;
+      }
+      const cached = materialState().cache.find((candidate) => String(candidate.fsId) === item.fsId);
+      if (cached) cached.remotePath = destinationPath;
+      return { ...item, destinationPath };
+    });
+    const history = {
+      id: crypto.randomUUID(),
+      destination,
+      count: moved.length,
+      items: moved,
+      movedAt,
+      requestId: payload.request_id || "",
+    };
+    organizer.moveHistory.unshift(history);
+    organizer.moveHistory = organizer.moveHistory.slice(0, 100);
+    await saveState();
+    await logEvent("baidu-materials-moved", `已移动 ${moved.length} 个百度网盘原件`, {
+      destination,
+      fsIds: moved.map((item) => item.fsId),
+      overwrite: false,
+    });
+    return { moved, history, organizer: publicOrganizer() };
   }
 
   async function fileMeta(fsId, { dlink = false, thumb = false } = {}) {
@@ -414,13 +788,13 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
     const record = cacheRecordById(id);
     if (!record || record.status !== "cached") throw new Error("请先把视频缓存到本机");
     if (record.mediaType !== "video") throw new Error("只有视频素材可以截帧");
-    if (!ffmpegAvailable) throw new Error("本机尚未安装 FFmpeg，暂时无法从视频截帧");
+    if (!ffmpegAvailable || !ffmpegExecutable) throw new Error("FFmpeg 视频处理组件不可用，暂时无法从视频截帧");
     const seconds = Number(timestamp);
     if (!Number.isFinite(seconds) || seconds < 0) throw new Error("请输入有效的截帧时间");
     const frameId = crypto.randomUUID();
     const baseName = safeFileName(path.basename(record.name, path.extname(record.name)));
     const outputPath = path.join(cacheDir, `${record.fsId || record.id}-${baseName}-frame-${Math.round(seconds * 1000)}.jpg`);
-    await execFileAsync("ffmpeg", [
+    await execFileAsync(ffmpegExecutable, [
       "-hide_banner",
       "-loglevel",
       "error",
@@ -479,6 +853,11 @@ export function createBaiduMaterialService({ runnerDir, port, getState, saveStat
     completeOAuth,
     disconnect,
     list,
+    organizer,
+    createVirtualFolder,
+    organize,
+    queueFolderImport,
+    moveRemoteItems,
     thumbnail,
     queueCache,
     removeCache,

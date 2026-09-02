@@ -4,11 +4,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { analyzeXhsCompetitor } from "./xhs-competitor.mjs";
+import { collectCreatorSnapshot } from "./xhs-creator-data.mjs";
 import { createBaiduMaterialService } from "./baidu-materials.mjs";
+import { createMaterialLibrary } from "./material-library.mjs";
 
 const runnerDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(runnerDir, "data");
 const sessionsDir = path.join(runnerDir, ".sessions");
+const fontsDir = path.join(dataDir, "fonts");
+const designsDir = path.join(dataDir, "designs");
+const designAssetsDir = path.join(dataDir, "design-assets");
+const designProjectsDir = path.join(dataDir, "design-projects");
 const statePath = path.join(dataDir, "state.json");
 const port = Number(process.env.XHS_RUNNER_PORT || 3100);
 const publishUrl =
@@ -19,6 +25,7 @@ const homeUrl = "https://creator.xiaohongshu.com/new/home";
 
 const contexts = new Map();
 const activeJobs = new Set();
+const activeCreatorSyncs = new Map();
 
 const initialAccounts = [
   { id: "feed-a", name: "信息流账号 A", business: "feed" },
@@ -36,10 +43,16 @@ let state = {
   accounts: initialAccounts,
   publishTasks: [],
   events: [],
+  creatorSnapshots: {},
+  messageAcknowledgements: {},
 };
 
 await fs.mkdir(dataDir, { recursive: true });
 await fs.mkdir(sessionsDir, { recursive: true });
+await fs.mkdir(fontsDir, { recursive: true });
+await fs.mkdir(designsDir, { recursive: true });
+await fs.mkdir(designAssetsDir, { recursive: true });
+await fs.mkdir(designProjectsDir, { recursive: true });
 
 try {
   state = { ...state, ...JSON.parse(await fs.readFile(statePath, "utf8")) };
@@ -47,6 +60,8 @@ try {
     ...base,
     ...(state.accounts || []).find((item) => item.id === base.id),
   }));
+  state.creatorSnapshots ||= {};
+  state.messageAcknowledgements ||= {};
 } catch {
   await saveState();
 }
@@ -59,6 +74,9 @@ const materialService = createBaiduMaterialService({
   logEvent,
 });
 await materialService.ready();
+
+const materialLibrary = createMaterialLibrary({ runnerDir });
+await materialLibrary.ready();
 
 async function saveState() {
   await fs.writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
@@ -163,7 +181,6 @@ async function openLogin(accountId) {
 
 async function checkLogin(accountId) {
   const page = await primaryPage(accountId);
-  await page.bringToFront();
   try {
     await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
   } catch {
@@ -212,6 +229,50 @@ async function pauseAccountTasks(accountId, reason) {
   }
   await logEvent("account-paused", reason, { accountId });
   await saveState();
+}
+
+async function collectCreatorAccountNow(accountId) {
+  const account = accountById(accountId);
+  if (!account) throw new Error("账号不存在");
+  const checked = await checkLogin(accountId);
+  if (checked.loginStatus !== "connected") throw new Error(checked.health);
+  const page = await primaryPage(accountId);
+  const snapshot = await collectCreatorSnapshot({
+    account: checked,
+    page,
+    acknowledgements: state.messageAcknowledgements[accountId] || {},
+  });
+  const accountAcknowledgements = state.messageAcknowledgements[accountId] ||= {};
+  const recentThreshold = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  for (const note of snapshot.notes) {
+    const publishedAt = new Date(note.publishedAt.replace(" ", "T") + ":00+08:00").getTime();
+    if (publishedAt < recentThreshold && !Object.prototype.hasOwnProperty.call(accountAcknowledgements, note.key)) {
+      accountAcknowledgements[note.key] = note.comments;
+    }
+  }
+  state.creatorSnapshots[accountId] = snapshot;
+  await updateAccount(accountId, {
+    platformName: snapshot.accountName,
+    xhsId: snapshot.profile.xhsId,
+    health: "后台数据已同步",
+  });
+  await logEvent("creator-data-synced", `已同步小红书后台：${snapshot.accountName}`, {
+    accountId,
+    totalNotes: snapshot.totalNotes,
+    collectedNotes: snapshot.collectedNotes,
+    commentSignals: snapshot.commentSignals.length,
+  });
+  await saveState();
+  return snapshot;
+}
+
+function collectCreatorAccount(accountId) {
+  const running = activeCreatorSyncs.get(accountId);
+  if (running) return running;
+  const job = collectCreatorAccountNow(accountId)
+    .finally(() => activeCreatorSyncs.delete(accountId));
+  activeCreatorSyncs.set(accountId, job);
+  return job;
 }
 
 function validatePublish(payload) {
@@ -307,7 +368,6 @@ async function executePublish(task) {
     }
 
     const page = await primaryPage(task.accountId);
-    await page.bringToFront();
     await page.goto(publishUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     const beforeSignals = await pageSignals(page);
     if (beforeSignals.blocked || beforeSignals.needsVerification || beforeSignals.loginPage) {
@@ -372,8 +432,9 @@ function corsHeaders(origin = "") {
     "http://127.0.0.1:3000",
     ...(process.env.RUNNER_ALLOWED_ORIGINS || "").split(",").map((item) => item.trim()).filter(Boolean),
   ];
+  const loopbackOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
   return {
-    "Access-Control-Allow-Origin": allowed.includes(origin) ? origin : allowed[0],
+    "Access-Control-Allow-Origin": allowed.includes(origin) || loopbackOrigin ? origin : allowed[0],
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Cache-Control": "no-store",
@@ -418,6 +479,18 @@ function sendStream(res, status, file, origin) {
   file.stream.pipe(res);
 }
 
+function sendAttachment(res, status, file, origin) {
+  res.writeHead(status, {
+    ...corsHeaders(origin),
+    "Content-Type": file.contentType,
+    "Content-Length": file.size,
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+    "Cache-Control": "private, no-store",
+  });
+  file.stream.on("error", () => res.destroy());
+  file.stream.pipe(res);
+}
+
 async function readJson(req) {
   let body = "";
   for await (const chunk of req) {
@@ -425,6 +498,39 @@ async function readJson(req) {
     if (body.length > 2_000_000) throw new Error("请求内容过大");
   }
   return body ? JSON.parse(body) : {};
+}
+
+async function readBuffer(req, limit = 40_000_000) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw new Error("上传文件过大");
+    chunks.push(chunk);
+  }
+  if (!size) throw new Error("上传文件为空");
+  return Buffer.concat(chunks);
+}
+
+function safeFileName(value, fallback) {
+  const name = path.basename(String(value || fallback)).replace(/[^\p{L}\p{N}._-]+/gu, "-");
+  return name.slice(0, 120) || fallback;
+}
+
+function fontContentType(fileName) {
+  const extension = path.extname(fileName).toLowerCase();
+  if (extension === ".woff2") return "font/woff2";
+  if (extension === ".woff") return "font/woff";
+  if (extension === ".otf") return "font/otf";
+  return "font/ttf";
+}
+
+function fontRecord(fileName) {
+  return {
+    id: fileName,
+    name: fileName.replace(/^\d+-/, ""),
+    family: `红序-${fileName.replace(/^\d+-/, "").replace(/\.[^.]+$/, "")}`,
+  };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -449,6 +555,245 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/tasks") {
       send(res, 200, { tasks: state.publishTasks, events: state.events.slice(0, 50) }, origin);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/creator-data") {
+      const business = url.searchParams.get("business");
+      const accounts = state.accounts.filter((account) => !business || account.business === business);
+      send(res, 200, {
+        accounts,
+        snapshots: accounts.map((account) => state.creatorSnapshots[account.id]).filter(Boolean),
+      }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/creator-data/sync") {
+      const payload = await readJson(req);
+      const targets = state.accounts.filter((account) =>
+        (!payload.business || account.business === payload.business) &&
+        (!Array.isArray(payload.accountIds) || payload.accountIds.includes(account.id)),
+      );
+      const results = [];
+      for (const account of targets) {
+        if (account.loginStatus !== "connected") {
+          results.push({ accountId: account.id, ok: false, error: "账号未登录" });
+          continue;
+        }
+        try {
+          const snapshot = await collectCreatorAccount(account.id);
+          results.push({ accountId: account.id, ok: true, snapshot });
+        } catch (error) {
+          results.push({ accountId: account.id, ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      send(res, 200, {
+        ok: results.some((result) => result.ok),
+        results,
+        accounts: state.accounts.filter((account) => !payload.business || account.business === payload.business),
+        snapshots: targets.map((account) => state.creatorSnapshots[account.id]).filter(Boolean),
+      }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/creator-data/messages/ack") {
+      const payload = await readJson(req);
+      if (!accountById(payload.accountId)) throw new Error("账号不存在");
+      if (!payload.noteKey) throw new Error("消息标识不能为空");
+      state.messageAcknowledgements[payload.accountId] ||= {};
+      state.messageAcknowledgements[payload.accountId][payload.noteKey] = Number(payload.commentCount || 0);
+      const snapshot = state.creatorSnapshots[payload.accountId];
+      if (snapshot) {
+        snapshot.commentSignals = snapshot.commentSignals.filter((item) => item.noteKey !== payload.noteKey);
+      }
+      await saveState();
+      send(res, 200, { ok: true, message: "已标记为已处理" }, origin);
+      return;
+    }
+
+    const openNoteManagerMatch = url.pathname.match(/^\/api\/accounts\/([^/]+)\/open-note-manager$/);
+    if (req.method === "POST" && openNoteManagerMatch) {
+      await readJson(req);
+      const account = await checkLogin(openNoteManagerMatch[1]);
+      if (account.loginStatus !== "connected") throw new Error(account.health);
+      const page = await primaryPage(openNoteManagerMatch[1]);
+      await page.bringToFront();
+      await page.goto("https://creator.xiaohongshu.com/new/note-manager", { waitUntil: "domcontentloaded", timeout: 60000 });
+      send(res, 200, { ok: true, message: "已打开该账号的笔记管理页" }, origin);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/design/fonts") {
+      const fileNames = await fs.readdir(fontsDir);
+      const fonts = fileNames
+        .filter((fileName) => /\.(ttf|otf|woff2?|ttc)$/i.test(fileName))
+        .sort((left, right) => right.localeCompare(left))
+        .map(fontRecord);
+      send(res, 200, { fonts }, origin);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/designs/project") {
+      const business = url.searchParams.get("business") === "ip" ? "ip" : "feed";
+      const projectPath = path.join(designProjectsDir, `${business}.json`);
+      const project = await fs.readFile(projectPath, "utf8").then(JSON.parse).catch(() => null);
+      send(res, 200, { project }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/designs/project") {
+      const business = url.searchParams.get("business") === "ip" ? "ip" : "feed";
+      const payload = await readJson(req);
+      if (!Array.isArray(payload.elements) || payload.elements.length > 300) throw new Error("画布项目格式不正确");
+      const project = {
+        version: 2,
+        business,
+        background: /^#[0-9a-f]{6}$/i.test(payload.background) ? payload.background : "#e7ddcf",
+        zoom: Math.max(30, Math.min(62, Number(payload.zoom) || 45)),
+        elements: payload.elements,
+        updatedAt: new Date().toISOString(),
+      };
+      const projectPath = path.join(designProjectsDir, `${business}.json`);
+      const temporaryPath = `${projectPath}.tmp`;
+      await fs.writeFile(temporaryPath, JSON.stringify(project), "utf8");
+      await fs.rename(temporaryPath, projectPath);
+      send(res, 200, { ok: true, project: { updatedAt: project.updatedAt } }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/designs/assets/upload") {
+      const requestedName = safeFileName(url.searchParams.get("name"), "design-image.png");
+      if (!/\.(png|jpe?g|webp|gif)$/i.test(requestedName)) throw new Error("图片需为 PNG、JPG、WEBP 或 GIF 格式");
+      const payload = await readBuffer(req, 35_000_000);
+      const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${requestedName}`;
+      await fs.writeFile(path.join(designAssetsDir, fileName), payload);
+      send(res, 201, { ok: true, asset: { id: fileName, name: requestedName } }, origin);
+      return;
+    }
+
+    const designAssetMatch = url.pathname.match(/^\/api\/designs\/assets\/([^/]+)\/file$/);
+    if (req.method === "GET" && designAssetMatch) {
+      const fileName = safeFileName(decodeURIComponent(designAssetMatch[1]), "");
+      if (!fileName || !/\.(png|jpe?g|webp|gif)$/i.test(fileName)) throw new Error("图片素材不存在");
+      const payload = await fs.readFile(path.join(designAssetsDir, fileName));
+      const extension = path.extname(fileName).toLowerCase();
+      const contentType = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : extension === ".gif" ? "image/gif" : "image/jpeg";
+      sendBuffer(res, 200, payload, contentType, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/design/fonts/upload") {
+      const requestedName = safeFileName(url.searchParams.get("name"), "custom-font.ttf");
+      if (!/\.(ttf|otf|woff2?|ttc)$/i.test(requestedName)) {
+        throw new Error("字体包需为 TTF、OTF、WOFF 或 WOFF2 格式");
+      }
+      const payload = await readBuffer(req, 50_000_000);
+      const fileName = `${Date.now()}-${requestedName}`;
+      await fs.writeFile(path.join(fontsDir, fileName), payload);
+      const font = fontRecord(fileName);
+      await logEvent("font-uploaded", `已保存自定义字体：${font.name}`);
+      send(res, 201, { ok: true, font, message: "字体已保存" }, origin);
+      return;
+    }
+
+    const fontFileMatch = url.pathname.match(/^\/api\/design\/fonts\/([^/]+)\/file$/);
+    if (req.method === "GET" && fontFileMatch) {
+      const fileName = safeFileName(decodeURIComponent(fontFileMatch[1]), "");
+      if (!fileName || !/\.(ttf|otf|woff2?|ttc)$/i.test(fileName)) throw new Error("字体不存在");
+      const payload = await fs.readFile(path.join(fontsDir, fileName));
+      sendBuffer(res, 200, payload, fontContentType(fileName), origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/designs/save") {
+      const payload = await readBuffer(req, 30_000_000);
+      if (payload[0] !== 0x89 || payload.toString("ascii", 1, 4) !== "PNG") throw new Error("只支持保存 PNG 成图");
+      const business = url.searchParams.get("business") === "ip" ? "ip" : "feed";
+      const businessDir = path.join(designsDir, business);
+      await fs.mkdir(businessDir, { recursive: true });
+      const requestedName = safeFileName(url.searchParams.get("name"), `红序成图-${Date.now()}.png`).replace(/\.[^.]+$/, "");
+      const fileName = `${requestedName}.png`;
+      const localPath = path.join(businessDir, fileName);
+      await fs.writeFile(localPath, payload);
+      await logEvent("design-saved", "图片设计成图已保存并加入草稿", { business, localPath });
+      send(res, 201, { ok: true, design: { name: fileName, localPath, width: 1080, height: 1440 }, message: "成图已保存" }, origin);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/library") {
+      send(res, 200, await materialLibrary.data(), origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/upload") {
+      const requestedName = url.searchParams.get("name") || "image.jpg";
+      const payload = await readBuffer(req, 35_000_000);
+      const result = await materialLibrary.upload(requestedName, payload, url.searchParams.get("role") || "unspecified");
+      send(res, result.duplicate ? 200 : 201, {
+        ok: true,
+        ...result,
+        message: result.duplicate ? "检测到相同图片，已保留素材库中的原件" : "图片已上传到素材库",
+      }, origin);
+      return;
+    }
+
+    const libraryAssetFileMatch = url.pathname.match(/^\/api\/library\/assets\/([^/]+)\/(file|thumbnail)$/);
+    if (req.method === "GET" && libraryAssetFileMatch) {
+      const file = await materialLibrary.fileForAsset(libraryAssetFileMatch[1], libraryAssetFileMatch[2] === "thumbnail");
+      sendStream(res, 200, file, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/assets/update") {
+      const changed = await materialLibrary.updateAssets(await readJson(req));
+      send(res, 200, { ok: true, changed, message: `已更新 ${changed.length} 张图片` }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/tag-groups") {
+      const payload = await readJson(req);
+      const group = await materialLibrary.createTagGroup(payload.name, payload.color);
+      send(res, 201, { ok: true, group, message: "标签组已创建" }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/tags") {
+      const payload = await readJson(req);
+      const tag = await materialLibrary.createTag(payload.name, payload.groupId);
+      send(res, 201, { ok: true, tag, message: "标签已创建" }, origin);
+      return;
+    }
+
+    const libraryTagMatch = url.pathname.match(/^\/api\/library\/tags\/([^/]+)\/update$/);
+    if (req.method === "POST" && libraryTagMatch) {
+      const tag = await materialLibrary.updateTag(libraryTagMatch[1], await readJson(req));
+      send(res, 200, { ok: true, tag, message: "标签已更新" }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/projects") {
+      const project = await materialLibrary.upsertProject(await readJson(req));
+      send(res, 200, { ok: true, project, message: "内容项目已保存" }, origin);
+      return;
+    }
+
+    const libraryExportMatch = url.pathname.match(/^\/api\/library\/projects\/([^/]+)\/export$/);
+    if (req.method === "POST" && libraryExportMatch) {
+      await readJson(req);
+      const result = await materialLibrary.exportProject(libraryExportMatch[1]);
+      send(res, 201, {
+        ok: true,
+        ...result,
+        downloadUrl: `/api/library/exports/${encodeURIComponent(result.zipName)}`,
+        message: `已按顺序导出 ${result.count} 张图片`,
+      }, origin);
+      return;
+    }
+
+    const libraryExportFileMatch = url.pathname.match(/^\/api\/library\/exports\/([^/]+)$/);
+    if (req.method === "GET" && libraryExportFileMatch) {
+      const file = await materialLibrary.exportFile(decodeURIComponent(libraryExportFileMatch[1]));
+      sendAttachment(res, 200, file, origin);
       return;
     }
 
@@ -483,6 +828,39 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/materials/files") {
       const result = await materialService.list(url.searchParams.get("dir") || undefined);
       send(res, 200, result, origin);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/materials/organizer") {
+      send(res, 200, await materialService.organizer(), origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/materials/organizer/folders") {
+      const payload = await readJson(req);
+      const folder = await materialService.createVirtualFolder(payload.name, payload.parentId);
+      send(res, 201, { ok: true, folder, message: `已创建虚拟素材夹“${folder.name}”` }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/materials/organizer/import-folder") {
+      const payload = await readJson(req);
+      const job = await materialService.queueFolderImport(payload.sourcePath, payload.sourceName, payload.targetFolderId);
+      send(res, 202, { ok: true, job, message: `正在把“${job.sourceName}”中的图片和视频归类到“${job.targetFolderName}”` }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/materials/organize") {
+      const payload = await readJson(req);
+      const result = await materialService.organize(payload.items, payload.folderIds, payload.tags);
+      send(res, 200, { ok: true, ...result, message: `已归类 ${result.items.length} 个素材，百度网盘原件未移动` }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/materials/baidu/move") {
+      const payload = await readJson(req);
+      const result = await materialService.moveRemoteItems(payload.items, payload.destination, payload.confirmed);
+      send(res, 200, { ok: true, ...result, message: `已移动 ${result.moved.length} 个百度网盘原件` }, origin);
       return;
     }
 

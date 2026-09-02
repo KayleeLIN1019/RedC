@@ -1,70 +1,73 @@
 "use client";
 
 import {
-  ArrowLeft,
+  ArrowDown,
+  ArrowUp,
+  Check,
   CheckCircle2,
-  Cloud,
+  Clock3,
   Download,
-  Film,
-  Folder,
-  HardDrive,
+  FileStack,
+  GripVertical,
   Image as ImageIcon,
+  Library,
   LoaderCircle,
-  LogOut,
+  Plus,
   RefreshCw,
-  Scissors,
+  Save,
   Search,
-  Trash2,
-  WifiOff,
+  Tags,
+  Upload,
+  X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type BusinessId = "feed" | "ip";
-type MaterialType = "folder" | "image" | "video" | "other";
+type AssetRole = "main" | "secondary" | "unspecified";
+type MaterialTab = "library" | "untagged" | "tags" | "projects";
 
-type CloudMaterial = {
-  fsId: string;
-  name: string;
-  path: string;
-  isDir: boolean;
-  size: number;
-  modifiedAt: number;
-  mediaType: MaterialType;
-  category: number;
-  cacheId: string;
-  cacheStatus: string;
-  localPath: string;
+type AssetUsage = {
+  projectId: string;
+  title: string;
+  position: number;
+  role: "main" | "secondary";
+  updatedAt: string;
 };
 
-type CachedMaterial = {
+type LibraryAsset = {
   id: string;
-  fsId: string;
-  remotePath: string;
   name: string;
-  mediaType: "image" | "video";
   size: number;
-  status: "queued" | "downloading" | "cached" | "failed";
-  localPath: string;
-  cachedAt?: string;
-  error?: string;
-  source: "baidu" | "frame";
-  timestamp?: number;
+  width: number;
+  height: number;
+  defaultRole: AssetRole;
+  tagIds: string[];
+  note: string;
+  source: string;
+  uploadedAt: string;
+  updatedAt: string;
+  usageCount: number;
+  usages: AssetUsage[];
 };
 
-type MaterialStatus = {
-  configured: boolean;
-  connected: boolean;
-  userName: string;
-  avatarUrl: string;
-  rootPath: string;
-  cacheDir: string;
-  cache: CachedMaterial[];
-  cacheUsage: {
-    usedBytes: number;
-    limitBytes: number;
-    diskAvailableBytes: number | null;
-  };
-  ffmpegAvailable: boolean;
+type TagGroup = { id: string; name: string; color: string; createdAt: string };
+type MaterialTag = { id: string; name: string; groupId: string; active: boolean; assetCount: number; createdAt: string };
+type ContentProject = {
+  id: string;
+  title: string;
+  business?: BusinessId;
+  status: "draft" | "completed";
+  items: Array<{ assetId: string; role: "main" | "secondary" }>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type LibraryData = {
+  storage: { mode: "local" | "online"; libraryDir: string; usedBytes: number };
+  tagGroups: TagGroup[];
+  tags: MaterialTag[];
+  assets: LibraryAsset[];
+  projects: ContentProject[];
 };
 
 type MaterialCenterProps = {
@@ -72,8 +75,14 @@ type MaterialCenterProps = {
   runnerOnline: boolean;
   runnerUrl: string;
   onUseImage: (localPath: string) => void;
+  onEditImage: (sourceUrl: string, name: string) => void;
   onOpenDraft: () => void;
   showToast: (message: string) => void;
+};
+
+const emptyData: LibraryData = {
+  storage: { mode: "local", libraryDir: "", usedBytes: 0 },
+  tagGroups: [], tags: [], assets: [], projects: [],
 };
 
 function formatBytes(bytes = 0) {
@@ -84,362 +93,273 @@ function formatBytes(bytes = 0) {
   return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
-function parentPath(remotePath: string) {
-  if (!remotePath || remotePath === "/") return "/";
-  const parts = remotePath.split("/").filter(Boolean);
-  parts.pop();
-  return parts.length ? `/${parts.join("/")}` : "/";
+function formatDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 
-function cacheStatusLabel(status: CachedMaterial["status"]) {
-  if (status === "downloading") return "正在缓存";
-  if (status === "queued") return "等待缓存";
-  if (status === "failed") return "缓存失败";
-  return "本机可用";
+function roleLabel(role: AssetRole) {
+  if (role === "main") return "主图素材";
+  if (role === "secondary") return "次图素材";
+  return "未分类";
 }
 
-export default function MaterialCenter({
-  business,
-  runnerOnline,
-  runnerUrl,
-  onUseImage,
-  onOpenDraft,
-  showToast,
-}: MaterialCenterProps) {
-  const [status, setStatus] = useState<MaterialStatus | null>(null);
-  const [files, setFiles] = useState<CloudMaterial[]>([]);
-  const [remotePath, setRemotePath] = useState("/");
+export default function MaterialCenter({ business, runnerOnline, runnerUrl, showToast }: MaterialCenterProps) {
+  const [data, setData] = useState<LibraryData>(emptyData);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState<MaterialTab>("library");
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "image" | "video">("all");
-  const [loadingFiles, setLoadingFiles] = useState(false);
-  const [busyId, setBusyId] = useState("");
-  const [frameTarget, setFrameTarget] = useState<CachedMaterial | null>(null);
-  const [frameSecond, setFrameSecond] = useState("0");
+  const [roleFilter, setRoleFilter] = useState<"all" | AssetRole>("all");
+  const [usageFilter, setUsageFilter] = useState<"all" | "used" | "unused">("all");
+  const [tagMode, setTagMode] = useState<"all" | "any">("all");
+  const [activeTagIds, setActiveTagIds] = useState<string[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [detailId, setDetailId] = useState("");
+  const [tagDialogOpen, setTagDialogOpen] = useState(false);
+  const [batchTagIds, setBatchTagIds] = useState<string[]>([]);
+  const [batchRole, setBatchRole] = useState<AssetRole | "keep">("keep");
+  const [savingLabels, setSavingLabels] = useState(false);
+  const [uploadState, setUploadState] = useState({ active: false, done: 0, total: 0 });
+  const [newGroupName, setNewGroupName] = useState("");
+  const [newTagName, setNewTagName] = useState("");
+  const [newTagGroupId, setNewTagGroupId] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [projectTitle, setProjectTitle] = useState("");
+  const [projectAssetIds, setProjectAssetIds] = useState<string[]>([]);
+  const [projectStatus, setProjectStatus] = useState<"draft" | "completed">("draft");
+  const [savingProject, setSavingProject] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
-  const request = useCallback(async (pathname: string, init?: RequestInit) => {
+  const requestJson = useCallback(async (pathname: string, init?: RequestInit) => {
     const response = await fetch(`${runnerUrl}${pathname}`, {
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "素材服务请求失败");
-    return data;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "素材库请求失败");
+    return result;
   }, [runnerUrl]);
 
-  const loadStatus = useCallback(async () => {
-    if (!runnerOnline) return;
+  const loadLibrary = useCallback(async () => {
+    if (!runnerOnline) { setLoading(false); return; }
     try {
-      const data = await request("/api/materials/status");
-      setStatus(data);
-      setRemotePath((current) => current === "/" && data.rootPath ? data.rootPath : current);
+      const result = await requestJson("/api/library");
+      setData({ ...emptyData, ...result });
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "无法读取素材服务状态");
-    }
-  }, [request, runnerOnline, showToast]);
-
-  const loadFiles = useCallback(async (targetPath: string) => {
-    if (!runnerOnline || !status?.connected) return;
-    setLoadingFiles(true);
-    try {
-      const data = await request(`/api/materials/files?dir=${encodeURIComponent(targetPath)}`);
-      setFiles(Array.isArray(data.files) ? data.files : []);
-      setRemotePath(data.dir || targetPath);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "无法读取百度网盘素材");
+      showToast(error instanceof Error ? error.message : "素材库读取失败");
     } finally {
-      setLoadingFiles(false);
+      setLoading(false);
     }
-  }, [request, runnerOnline, showToast, status?.connected]);
+  }, [requestJson, runnerOnline, showToast]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void loadStatus(), 0);
+    const timer = window.setTimeout(() => void loadLibrary(), 0);
     return () => window.clearTimeout(timer);
-  }, [loadStatus]);
+  }, [loadLibrary]);
 
-  useEffect(() => {
-    if (!status?.connected) return;
-    const timer = window.setTimeout(() => void loadFiles(remotePath || status.rootPath || "/"), 0);
-    // The first successful connection should immediately show its root directory.
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.connected]);
+  const activeTags = useMemo(() => data.tags.filter((tag) => tag.active !== false), [data.tags]);
+  const tagById = useMemo(() => new Map(data.tags.map((tag) => [tag.id, tag])), [data.tags]);
+  const assetById = useMemo(() => new Map(data.assets.map((asset) => [asset.id, asset])), [data.assets]);
+  const detailAsset = detailId ? assetById.get(detailId) : undefined;
+  const currentProjects = useMemo(() => data.projects.filter((project) => !project.business || project.business === business), [business, data.projects]);
+  const effectiveTagGroupId = newTagGroupId || data.tagGroups[0]?.id || "";
 
-  useEffect(() => {
-    if (!status?.cache.some((item) => ["queued", "downloading"].includes(item.status))) return;
-    const timer = window.setInterval(() => void loadStatus(), 2500);
-    return () => window.clearInterval(timer);
-  }, [loadStatus, status?.cache]);
-
-  const cachedByFsId = useMemo(
-    () => new Map((status?.cache || []).filter((item) => item.fsId).map((item) => [item.fsId, item])),
-    [status?.cache],
-  );
-
-  const visibleFiles = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return files.filter((item) => {
-      if (!item.isDir && !["image", "video"].includes(item.mediaType)) return false;
-      if (typeFilter !== "all" && !item.isDir && item.mediaType !== typeFilter) return false;
-      return !normalizedQuery || item.name.toLowerCase().includes(normalizedQuery);
+  const visibleAssets = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return data.assets.filter((asset) => {
+      if (tab === "untagged" && asset.tagIds.length > 0 && asset.defaultRole !== "unspecified") return false;
+      if (normalized && !`${asset.name} ${asset.note || ""} ${asset.source || ""}`.toLowerCase().includes(normalized)) return false;
+      if (roleFilter !== "all" && asset.defaultRole !== roleFilter) return false;
+      if (usageFilter === "used" && asset.usageCount === 0) return false;
+      if (usageFilter === "unused" && asset.usageCount > 0) return false;
+      if (activeTagIds.length) {
+        const matches = activeTagIds.map((tagId) => asset.tagIds.includes(tagId));
+        if (tagMode === "all" ? !matches.every(Boolean) : !matches.some(Boolean)) return false;
+      }
+      return true;
     });
-  }, [files, query, typeFilter]);
+  }, [activeTagIds, data.assets, query, roleFilter, tab, tagMode, usageFilter]);
 
-  async function connectBaidu() {
-    try {
-      const data = await request("/api/materials/baidu/auth-url", {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      const popup = window.open(data.authUrl, "baidu-pan-auth", "width=560,height=720");
-      if (!popup) throw new Error("浏览器阻止了授权窗口，请允许弹窗后重试");
-      showToast("请在新窗口中完成百度网盘授权");
-      const timer = window.setInterval(async () => {
-        if (popup.closed) {
-          window.clearInterval(timer);
-          await loadStatus();
-        }
-      }, 1000);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "无法发起百度网盘授权");
-    }
+  const allVisibleSelected = visibleAssets.length > 0 && visibleAssets.every((asset) => selectedIds.includes(asset.id));
+  const untaggedCount = data.assets.filter((asset) => !asset.tagIds.length || asset.defaultRole === "unspecified").length;
+  const usedCount = data.assets.filter((asset) => asset.usageCount > 0).length;
+
+  async function uploadFiles(fileList: FileList | null) {
+    const files = Array.from(fileList || []).filter((file) => /^image\/(png|jpeg|webp|gif)$/i.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name));
+    if (!files.length) { showToast("请选择 PNG、JPG、WEBP 或 GIF 图片"); return; }
+    setUploadState({ active: true, done: 0, total: files.length });
+    let cursor = 0;
+    let done = 0;
+    let duplicates = 0;
+    let failed = 0;
+    const worker = async () => {
+      while (cursor < files.length) {
+        const file = files[cursor];
+        cursor += 1;
+        try {
+          const response = await fetch(`${runnerUrl}/api/library/upload?name=${encodeURIComponent(file.name)}`, {
+            method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error || "上传失败");
+          if (result.duplicate) duplicates += 1;
+        } catch { failed += 1; }
+        finally { done += 1; setUploadState({ active: true, done, total: files.length }); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, files.length) }, worker));
+    setUploadState({ active: false, done, total: files.length });
+    if (uploadInputRef.current) uploadInputRef.current.value = "";
+    await loadLibrary();
+    setTab("untagged");
+    showToast(`上传完成：新增 ${files.length - duplicates - failed} 张${duplicates ? `，跳过 ${duplicates} 张重复图` : ""}${failed ? `，${failed} 张失败` : ""}`);
   }
 
-  async function disconnectBaidu() {
-    if (!window.confirm("确认断开百度网盘？本机缓存和百度网盘原件都不会删除。")) return;
-    try {
-      const data = await request("/api/materials/baidu/disconnect", {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      setFiles([]);
-      await loadStatus();
-      showToast(data.message || "百度网盘已断开");
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "无法断开百度网盘");
-    }
+  function toggleSelection(id: string) {
+    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }
 
-  async function cacheMaterial(item: CloudMaterial) {
-    setBusyId(item.fsId);
-    try {
-      const data = await request("/api/materials/cache", {
-        method: "POST",
-        body: JSON.stringify(item),
-      });
-      await loadStatus();
-      showToast(data.message || "已加入本机缓存队列");
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "素材缓存失败");
-    } finally {
-      setBusyId("");
-    }
+  function toggleVisibleSelection() {
+    if (allVisibleSelected) {
+      const visibleIds = new Set(visibleAssets.map((asset) => asset.id));
+      setSelectedIds((current) => current.filter((id) => !visibleIds.has(id)));
+    } else setSelectedIds((current) => [...new Set([...current, ...visibleAssets.map((asset) => asset.id)])]);
   }
 
-  async function removeCache(item: CachedMaterial) {
-    if (!window.confirm(`确认清理“${item.name}”的本机缓存？百度网盘原件不会删除。`)) return;
-    setBusyId(item.id);
+  async function saveBatchLabels() {
+    setSavingLabels(true);
     try {
-      const data = await request(`/api/materials/cache/${item.id}/remove`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      await loadStatus();
-      if (status?.connected) await loadFiles(remotePath);
-      showToast(data.message || "本机缓存已清理");
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "缓存清理失败");
-    } finally {
-      setBusyId("");
-    }
+      const result = await requestJson("/api/library/assets/update", { method: "POST", body: JSON.stringify({ ids: selectedIds, addTagIds: batchTagIds, defaultRole: batchRole === "keep" ? undefined : batchRole }) });
+      showToast(result.message || "图片标签已保存");
+      setTagDialogOpen(false); setSelectedIds([]); setBatchTagIds([]); setBatchRole("keep");
+      await loadLibrary();
+    } catch (error) { showToast(error instanceof Error ? error.message : "标签保存失败"); }
+    finally { setSavingLabels(false); }
   }
 
-  async function extractFrame() {
-    if (!frameTarget) return;
-    setBusyId(frameTarget.id);
+  async function updateSingleAsset(patch: Record<string, unknown>) {
+    if (!detailAsset) return;
     try {
-      const data = await request(`/api/materials/cache/${frameTarget.id}/frame`, {
-        method: "POST",
-        body: JSON.stringify({ timestamp: Number(frameSecond), business }),
-      });
-      await loadStatus();
-      onUseImage(data.frame.localPath);
-      setFrameTarget(null);
-      showToast("视频画面已截取，并加入当前草稿");
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "视频截帧失败");
-    } finally {
-      setBusyId("");
-    }
+      await requestJson("/api/library/assets/update", { method: "POST", body: JSON.stringify({ ids: [detailAsset.id], ...patch }) });
+      await loadLibrary();
+    } catch (error) { showToast(error instanceof Error ? error.message : "图片更新失败"); }
+  }
+
+  async function createGroup() {
+    if (!newGroupName.trim()) return;
+    try {
+      const result = await requestJson("/api/library/tag-groups", { method: "POST", body: JSON.stringify({ name: newGroupName }) });
+      setNewGroupName(""); setNewTagGroupId(result.group.id); await loadLibrary(); showToast("标签组已创建");
+    } catch (error) { showToast(error instanceof Error ? error.message : "标签组创建失败"); }
+  }
+
+  async function createTag() {
+    if (!newTagName.trim() || !effectiveTagGroupId) return;
+    try {
+      await requestJson("/api/library/tags", { method: "POST", body: JSON.stringify({ name: newTagName, groupId: effectiveTagGroupId }) });
+      setNewTagName(""); await loadLibrary(); showToast("标签已创建，现在可以给图片打标");
+    } catch (error) { showToast(error instanceof Error ? error.message : "标签创建失败"); }
+  }
+
+  async function renameTag(tag: MaterialTag) {
+    const name = window.prompt("新的标签名称", tag.name)?.trim();
+    if (!name || name === tag.name) return;
+    try {
+      await requestJson(`/api/library/tags/${tag.id}/update`, { method: "POST", body: JSON.stringify({ name }) });
+      await loadLibrary(); showToast("标签名称已更新");
+    } catch (error) { showToast(error instanceof Error ? error.message : "标签修改失败"); }
+  }
+
+  function startNewProject() {
+    setProjectId(""); setProjectTitle(""); setProjectAssetIds([]); setProjectStatus("draft"); setTab("projects");
+  }
+
+  function openProject(project: ContentProject) {
+    setProjectId(project.id); setProjectTitle(project.title); setProjectAssetIds(project.items.map((item) => item.assetId)); setProjectStatus(project.status); setTab("projects");
+  }
+
+  function addToProject(ids: string[]) {
+    const available = ids.filter((id) => assetById.has(id));
+    if (!available.length) return;
+    const nextCount = new Set([...projectAssetIds, ...available]).size;
+    setProjectAssetIds((current) => [...new Set([...current, ...available])]);
+    setSelectedIds([]); showToast(`已加入内容拼装台，共 ${nextCount} 张`);
+  }
+
+  function reorderProject(from: number, to: number) {
+    if (from === to || from < 0 || to < 0) return;
+    setProjectAssetIds((current) => {
+      const next = [...current]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); return next;
+    });
+  }
+
+  async function saveProject() {
+    setSavingProject(true);
+    try {
+      const result = await requestJson("/api/library/projects", { method: "POST", body: JSON.stringify({ id: projectId || undefined, title: projectTitle, status: projectStatus, assetIds: projectAssetIds, business }) });
+      setProjectId(result.project.id); await loadLibrary(); showToast("内容项目已保存，图片使用记录已更新");
+    } catch (error) { showToast(error instanceof Error ? error.message : "内容项目保存失败"); }
+    finally { setSavingProject(false); }
+  }
+
+  async function exportProject() {
+    if (!projectId) { showToast("请先保存内容项目，再导出图片包"); return; }
+    try {
+      const result = await requestJson(`/api/library/projects/${projectId}/export`, { method: "POST", body: JSON.stringify({}) });
+      const anchor = document.createElement("a");
+      anchor.href = `${runnerUrl}${result.downloadUrl}`; anchor.download = result.zipName; document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      showToast(result.message || "图片包已导出");
+    } catch (error) { showToast(error instanceof Error ? error.message : "导出失败"); }
   }
 
   if (!runnerOnline) {
-    return (
-      <section>
-        <div className="page-header">
-          <div><h1>素材中心</h1><p>百度网盘云端原件与本机发布缓存。</p></div>
-        </div>
-        <div className="large-empty material-offline">
-          <WifiOff size={30} />
-          <h3>本地素材服务尚未启动</h3>
-          <p>启动红序本地执行器后，才能连接百度网盘、缓存视频并完成截帧。</p>
-        </div>
-      </section>
-    );
+    return <section className="assetlib-offline"><Library size={30} /><h2>素材库等待启动</h2><p>请先运行本地执行器，图片原件、标签和内容项目才能安全保存。</p><code>npm run runner</code></section>;
   }
-
-  if (!status) {
-    return <section className="material-loading"><LoaderCircle className="spin" size={24} />正在读取素材中心…</section>;
-  }
-
-  const usagePercent = Math.min(100, status.cacheUsage.limitBytes
-    ? (status.cacheUsage.usedBytes / status.cacheUsage.limitBytes) * 100
-    : 0);
-  const cachedItems = status.cache.filter((item) => item.status !== "failed" || item.error);
 
   return (
-    <section>
-      <div className="page-header">
-        <div><h1>素材中心</h1><p>百度网盘保存云端原件，本机只缓存正在制作和发布的素材。</p></div>
-        <div className="page-header-actions">
-          <button className="secondary-button" onClick={onOpenDraft}>查看当前草稿</button>
-          {status.connected
-            ? <button className="secondary-button" onClick={disconnectBaidu}><LogOut size={15} />断开网盘</button>
-            : <button className="primary-button" disabled={!status.configured} onClick={connectBaidu}><Cloud size={15} />连接百度网盘</button>}
-        </div>
+    <section className="assetlib-page">
+      <input ref={uploadInputRef} className="assetlib-hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => void uploadFiles(event.target.files)} />
+      <header className="assetlib-header">
+        <div><span className="assetlib-eyebrow">XIAOHONGSHU ASSET LIBRARY</span><h1>图片素材库</h1><p>上传、分类、复用，再把主图和次图整理成一套完整内容。</p></div>
+        <div className="assetlib-header-actions"><button className="secondary-button" disabled={loading} onClick={() => void loadLibrary()}><RefreshCw className={loading ? "spin" : ""} size={15} />刷新</button><button className="primary-button" disabled={uploadState.active} onClick={() => uploadInputRef.current?.click()}>{uploadState.active ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}{uploadState.active ? `上传中 ${uploadState.done}/${uploadState.total}` : "上传图片"}</button></div>
+      </header>
+
+      <div className="assetlib-stat-grid">
+        <article><ImageIcon size={18} /><div><strong>{data.assets.length}</strong><span>全部图片</span></div></article>
+        <article><Tags size={18} /><div><strong>{untaggedCount}</strong><span>待整理</span></div></article>
+        <article><CheckCircle2 size={18} /><div><strong>{usedCount}</strong><span>已被内容使用</span></div></article>
+        <article><FileStack size={18} /><div><strong>{currentProjects.length}</strong><span>内容项目</span></div></article>
+        <article><Library size={18} /><div><strong>{formatBytes(data.storage.usedBytes)}</strong><span>本地原件占用</span></div></article>
       </div>
 
-      <div className="material-status-grid">
-        <article className={`material-status-card ${status.connected ? "connected" : ""}`}>
-          <div className="material-status-icon"><Cloud size={20} /></div>
-          <div>
-            <span>云端素材主库</span>
-            <strong>{status.connected ? status.userName || "百度网盘已连接" : status.configured ? "等待连接百度网盘" : "等待配置百度开放平台"}</strong>
-            <small>{status.connected ? `当前目录 ${status.rootPath}` : "云端原件不会因清理本机缓存而删除"}</small>
-          </div>
-          <i className={status.connected ? "online" : ""} />
-        </article>
-        <article className="material-status-card">
-          <div className="material-status-icon"><HardDrive size={20} /></div>
-          <div>
-            <span>本机智能缓存</span>
-            <strong>{formatBytes(status.cacheUsage.usedBytes)} / {formatBytes(status.cacheUsage.limitBytes)}</strong>
-            <div className="cache-meter"><span style={{ width: `${usagePercent}%` }} /></div>
-            <small title={status.cacheDir}>缓存位置：{status.cacheDir.split("/").slice(-2).join("/")}</small>
-          </div>
-        </article>
-        <article className="material-status-card">
-          <div className="material-status-icon"><Scissors size={20} /></div>
-          <div>
-            <span>视频处理</span>
-            <strong>{status.ffmpegAvailable ? "可以截取视频画面" : "等待安装视频处理组件"}</strong>
-            <small>截帧图片会保存到缓存并保留来源关系</small>
-          </div>
-          {status.ffmpegAvailable && <CheckCircle2 className="material-ready" size={18} />}
-        </article>
-      </div>
+      <nav className="assetlib-tabs" aria-label="素材库功能">
+        <button className={tab === "library" ? "active" : ""} onClick={() => setTab("library")}><Library size={14} />全部素材</button>
+        <button className={tab === "untagged" ? "active" : ""} onClick={() => setTab("untagged")}><Clock3 size={14} />待整理 {untaggedCount > 0 && <em>{untaggedCount}</em>}</button>
+        <button className={tab === "tags" ? "active" : ""} onClick={() => setTab("tags")}><Tags size={14} />标签管理</button>
+        <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}><FileStack size={14} />内容拼装</button>
+      </nav>
 
-      {!status.configured && (
-        <div className="material-setup-card">
-          <Cloud size={22} />
-          <div><strong>还差一步即可连接百度网盘</strong><p>在百度网盘开放平台创建应用，然后把 App Key、Secret Key 和回调地址填入红序的本地配置。配置说明已经写入项目使用指南。</p></div>
-        </div>
-      )}
+      {(tab === "library" || tab === "untagged") && <>
+        <div className="assetlib-filters"><label className="assetlib-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件名、备注或来源" /></label><select aria-label="图片用途" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value as typeof roleFilter)}><option value="all">全部用途</option><option value="main">主图素材</option><option value="secondary">次图素材</option><option value="unspecified">未分类</option></select><select aria-label="使用状态" value={usageFilter} onChange={(event) => setUsageFilter(event.target.value as typeof usageFilter)}><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select><button className="assetlib-mode-button" onClick={() => setTagMode((current) => current === "all" ? "any" : "all")}>{tagMode === "all" ? "满足全部标签" : "满足任意标签"}</button></div>
 
-      {status.connected && (
-        <div className="material-workspace">
-          <div className="cloud-library-panel">
-            <div className="material-toolbar">
-              <div className="search-box"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索当前文件夹中的图片或视频" /></div>
-              <div className="material-filter-tabs">
-                {([['all', '全部'], ['image', '图片'], ['video', '视频']] as const).map(([value, label]) => (
-                  <button key={value} className={typeFilter === value ? "active" : ""} onClick={() => setTypeFilter(value)}>{label}</button>
-                ))}
-              </div>
-              <button className="icon-button" title="刷新百度网盘目录" onClick={() => loadFiles(remotePath)}><RefreshCw className={loadingFiles ? "spin" : ""} size={15} /></button>
-            </div>
+        {activeTags.length > 0 && <div className="assetlib-tag-filter">{data.tagGroups.map((group) => { const tags = activeTags.filter((tag) => tag.groupId === group.id); if (!tags.length) return null; return <div key={group.id}><span style={{ color: group.color }}>{group.name}</span><div>{tags.map((tag) => <button key={tag.id} className={activeTagIds.includes(tag.id) ? "active" : ""} onClick={() => setActiveTagIds((current) => current.includes(tag.id) ? current.filter((id) => id !== tag.id) : [...current, tag.id])}>#{tag.name}<small>{tag.assetCount}</small></button>)}</div></div>; })}{activeTagIds.length > 0 && <button className="assetlib-clear-filter" onClick={() => setActiveTagIds([])}><X size={12} />清空标签筛选</button>}</div>}
 
-            <div className="material-path-row">
-              <button disabled={remotePath === status.rootPath || remotePath === "/"} onClick={() => loadFiles(parentPath(remotePath))}><ArrowLeft size={14} />返回上级</button>
-              <span>百度网盘 {remotePath}</span>
-              <small>{visibleFiles.length} 项</small>
-            </div>
+        <div className={`assetlib-selection ${selectedIds.length ? "visible" : ""}`}><button onClick={toggleVisibleSelection}><span className={`assetlib-check ${allVisibleSelected ? "checked" : ""}`}>{allVisibleSelected && <Check size={11} />}</span>{allVisibleSelected ? "取消全选" : "全选当前结果"}</button><span>已选 <strong>{selectedIds.length}</strong> 张</span>{selectedIds.length > 0 && <><button onClick={() => setSelectedIds([])}><X size={12} />清空</button><button onClick={() => { setBatchTagIds([]); setBatchRole("keep"); setTagDialogOpen(true); }}><Tags size={13} />批量打标</button><button className="primary" onClick={() => addToProject(selectedIds)}><Plus size={13} />加入内容</button></>}</div>
 
-            {loadingFiles ? (
-              <div className="material-grid-empty"><LoaderCircle className="spin" size={22} />正在读取云端素材…</div>
-            ) : visibleFiles.length === 0 ? (
-              <div className="material-grid-empty"><Folder size={24} /><strong>当前目录没有匹配的素材</strong><span>可以返回上级目录或调整搜索条件。</span></div>
-            ) : (
-              <div className="material-grid">
-                {visibleFiles.map((item) => {
-                  const cached = cachedByFsId.get(item.fsId);
-                  const isCached = cached?.status === "cached";
-                  return (
-                    <article className={`material-card ${item.isDir ? "folder" : ""}`} key={item.fsId || item.path}>
-                      <button className="material-preview" onClick={() => item.isDir && loadFiles(item.path)} aria-label={item.isDir ? `打开文件夹 ${item.name}` : item.name}>
-                        {item.isDir ? <Folder size={38} /> : item.mediaType === "image" ? (
-                          <img src={`${runnerUrl}/api/materials/thumbnail?fsId=${encodeURIComponent(item.fsId)}`} alt="" loading="lazy" />
-                        ) : <Film size={34} />}
-                        {item.mediaType === "video" && <span className="material-type-badge">视频</span>}
-                        {isCached && <span className="material-cached-badge"><CheckCircle2 size={12} />本机可用</span>}
-                      </button>
-                      <div className="material-card-copy">
-                        <strong title={item.name}>{item.name}</strong>
-                        <span>{item.isDir ? "文件夹" : `${formatBytes(item.size)} · ${new Date(item.modifiedAt).toLocaleDateString("zh-CN")}`}</span>
-                      </div>
-                      {!item.isDir && (
-                        <div className="material-card-actions">
-                          {!cached || cached.status === "failed" ? (
-                            <button disabled={busyId === item.fsId} onClick={() => cacheMaterial(item)}><Download size={13} />{cached?.status === "failed" ? "重试" : "缓存"}</button>
-                          ) : cached.status !== "cached" ? (
-                            <button disabled><LoaderCircle className="spin" size={13} />缓存中</button>
-                          ) : cached.mediaType === "image" ? (
-                            <button onClick={() => { onUseImage(cached.localPath); showToast("图片已加入当前草稿"); }}><ImageIcon size={13} />加入草稿</button>
-                          ) : (
-                            <button onClick={() => { setFrameTarget(cached); setFrameSecond("0"); }}><Scissors size={13} />截取画面</button>
-                          )}
-                        </div>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+        {loading ? <div className="assetlib-empty"><LoaderCircle className="spin" size={24} /><strong>正在读取素材库…</strong></div> : visibleAssets.length === 0 ? <div className="assetlib-empty"><Upload size={26} /><strong>{data.assets.length ? "没有符合条件的图片" : "素材库还是空的"}</strong><span>{data.assets.length ? "调整筛选条件，或清空标签筛选。" : "上传第一批图片，系统会自动查重并放入待整理区。"}</span>{!data.assets.length && <button className="primary-button" onClick={() => uploadInputRef.current?.click()}><Upload size={14} />上传第一批素材</button>}</div> : <div className="assetlib-grid">{visibleAssets.map((asset) => { const selected = selectedIds.includes(asset.id); return <article className={`assetlib-card ${selected ? "selected" : ""}`} key={asset.id}><button className={`assetlib-card-check ${selected ? "selected" : ""}`} aria-label={selected ? `取消选择 ${asset.name}` : `选择 ${asset.name}`} onClick={() => toggleSelection(asset.id)}>{selected && <Check size={13} />}</button><button className="assetlib-preview" onClick={() => setDetailId(asset.id)}><img src={`${runnerUrl}/api/library/assets/${asset.id}/thumbnail`} alt={asset.name} loading="lazy" /><span className={`assetlib-role ${asset.defaultRole}`}>{roleLabel(asset.defaultRole)}</span>{asset.usageCount > 0 && <span className="assetlib-used"><CheckCircle2 size={11} />用过 {asset.usageCount} 次</span>}</button><div className="assetlib-card-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.width && asset.height ? `${asset.width}×${asset.height} · ` : ""}{formatBytes(asset.size)}</span></div><div className="assetlib-card-tags">{asset.tagIds.slice(0, 3).map((tagId) => tagById.get(tagId)).filter(Boolean).map((tag) => <span key={tag!.id}>#{tag!.name}</span>)}{asset.tagIds.length > 3 && <small>+{asset.tagIds.length - 3}</small>}{!asset.tagIds.length && <em>尚未打标签</em>}</div><div className="assetlib-card-actions"><button onClick={() => setDetailId(asset.id)}>详情</button><button onClick={() => addToProject([asset.id])}><Plus size={12} />加入内容</button></div></article>; })}</div>}
 
-          <aside className="cache-panel">
-            <div className="panel-title"><div><strong>本机缓存</strong><span>{cachedItems.length} 个素材</span></div><HardDrive size={16} /></div>
-            <p className="cache-note">只清理本机副本，不会影响百度网盘原件。</p>
-            <div className="cache-list">
-              {cachedItems.length === 0 && <div className="cache-empty"><Download size={20} /><span>从左侧选择素材缓存</span></div>}
-              {cachedItems.slice(0, 12).map((item) => (
-                <div className="cache-row" key={item.id}>
-                  <div className={`cache-thumb ${item.mediaType}`}>
-                    {item.mediaType === "image" && item.status === "cached"
-                      ? <img src={`${runnerUrl}/api/materials/cache/${item.id}/file`} alt="" loading="lazy" />
-                      : item.mediaType === "video" ? <Film size={16} /> : <ImageIcon size={16} />}
-                  </div>
-                  <div><strong title={item.name}>{item.name}</strong><span className={item.status === "failed" ? "failed" : ""}>{cacheStatusLabel(item.status)} · {formatBytes(item.size)}</span></div>
-                  {item.status === "cached" && item.mediaType === "image" && <button className="icon-button" title="加入草稿" onClick={() => { onUseImage(item.localPath); showToast("图片已加入当前草稿"); }}><ImageIcon size={14} /></button>}
-                  {item.status === "cached" && item.mediaType === "video" && <button className="icon-button" title="截取画面" onClick={() => { setFrameTarget(item); setFrameSecond("0"); }}><Scissors size={14} /></button>}
-                  <button className="icon-button danger-icon" disabled={busyId === item.id || item.status === "downloading"} title="清理本机缓存" onClick={() => removeCache(item)}><Trash2 size={14} /></button>
-                </div>
-              ))}
-            </div>
-          </aside>
-        </div>
-      )}
+        {projectAssetIds.length > 0 && <div className="assetlib-assembly-dock"><div><FileStack size={17} /><span>拼装台已有 <strong>{projectAssetIds.length}</strong> 张图片</span></div><button onClick={() => setTab("projects")}>打开内容拼装台</button></div>}
+      </>}
 
-      {frameTarget && (
-        <div className="frame-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setFrameTarget(null)}>
-          <div className="frame-dialog" role="dialog" aria-modal="true" aria-labelledby="frame-dialog-title">
-            <div className="frame-dialog-head"><div><span>视频截帧</span><h3 id="frame-dialog-title">{frameTarget.name}</h3></div><button className="icon-button" aria-label="关闭" onClick={() => setFrameTarget(null)}>×</button></div>
-            <video controls preload="metadata" src={`${runnerUrl}/api/materials/cache/${frameTarget.id}/file`} />
-            <label><span>截取时间（秒）</span><input type="number" min="0" step="0.1" value={frameSecond} onChange={(event) => setFrameSecond(event.target.value)} /></label>
-            <p>在视频中找到需要的画面，把播放器显示的时间填在这里。截取后会自动加入当前业务草稿。</p>
-            <div className="frame-dialog-actions"><button className="secondary-button" onClick={() => setFrameTarget(null)}>取消</button><button className="primary-button" disabled={busyId === frameTarget.id} onClick={extractFrame}>{busyId === frameTarget.id ? <LoaderCircle className="spin" size={14} /> : <Scissors size={14} />}截取并加入草稿</button></div>
-          </div>
-        </div>
-      )}
+      {tab === "tags" && <div className="assetlib-tag-admin"><div className="assetlib-tag-create"><div><h3>创建标签组</h3><p>标签组用于区分主题、空间、风格等维度。</p><label><input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder="例如：装修阶段" /><button disabled={!newGroupName.trim()} onClick={() => void createGroup()}><Plus size={13} />新增</button></label></div><div><h3>创建标签</h3><p>创建后即可用于单张或批量图片打标。</p><label><select value={effectiveTagGroupId} onChange={(event) => setNewTagGroupId(event.target.value)}>{data.tagGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select><input value={newTagName} onChange={(event) => setNewTagName(event.target.value)} placeholder="例如：客厅" /><button disabled={!newTagName.trim() || !effectiveTagGroupId} onClick={() => void createTag()}><Plus size={13} />新增</button></label></div></div><div className="assetlib-group-grid">{data.tagGroups.map((group) => { const groupTags = data.tags.filter((tag) => tag.groupId === group.id && tag.active !== false); return <article key={group.id}><header><i style={{ background: group.color }} /><div><strong>{group.name}</strong><span>{groupTags.length} 个标签</span></div></header>{groupTags.length ? <div>{groupTags.map((tag) => <button key={tag.id} onClick={() => void renameTag(tag)}><span>#{tag.name}</span><small>{tag.assetCount} 张 · 点击改名</small></button>)}</div> : <p>这个标签组还没有标签</p>}</article>; })}</div></div>}
+
+      {tab === "projects" && <div className="assetlib-project-layout"><aside className="assetlib-project-list"><header><div><strong>内容项目</strong><span>{currentProjects.length} 个已保存项目</span></div><button aria-label="新建内容项目" onClick={startNewProject}><Plus size={15} /></button></header>{currentProjects.length === 0 && <p>还没有保存的内容项目。</p>}{currentProjects.map((project) => <button className={project.id === projectId ? "active" : ""} key={project.id} onClick={() => openProject(project)}><div><strong>{project.title}</strong><span>{project.items.length} 张图片 · {project.status === "completed" ? "已完成" : "草稿"}</span></div><small>{formatDate(project.updatedAt)}</small></button>)}</aside><main className="assetlib-builder"><header><div><span>{projectId ? "编辑内容项目" : "新建内容项目"}</span><input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="输入小红书内容标题" maxLength={80} /></div><div><select value={projectStatus} onChange={(event) => setProjectStatus(event.target.value as typeof projectStatus)}><option value="draft">草稿</option><option value="completed">已完成</option></select><button className="secondary-button" onClick={() => { setTab("library"); setSelectedIds([]); }}><Plus size={14} />继续选图</button><button className="primary-button" disabled={savingProject || !projectTitle.trim() || !projectAssetIds.length} onClick={() => void saveProject()}>{savingProject ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}保存项目</button></div></header><div className="assetlib-builder-note"><span>第 1 张自动作为主图，其余为次图。拖动卡片或使用箭头都可以重新排序。</span><strong>{projectAssetIds.length} 张</strong></div>{projectAssetIds.length === 0 ? <div className="assetlib-builder-empty"><ImageIcon size={28} /><strong>还没有选择图片</strong><span>返回素材库选择主图和次图，再加入拼装台。</span><button className="primary-button" onClick={() => setTab("library")}><Plus size={14} />去素材库选图</button></div> : <div className="assetlib-builder-grid">{projectAssetIds.map((assetId, index) => { const asset = assetById.get(assetId); if (!asset) return null; return <article key={assetId} draggable onDragStart={() => setDragIndex(index)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (dragIndex !== null) reorderProject(dragIndex, index); setDragIndex(null); }}><div className="assetlib-builder-index"><GripVertical size={14} /><strong>{String(index + 1).padStart(2, "0")}</strong><span>{index === 0 ? "主图" : "次图"}</span></div><img src={`${runnerUrl}/api/library/assets/${asset.id}/thumbnail`} alt={asset.name} /><div><strong title={asset.name}>{asset.name}</strong><span>{asset.tagIds.map((id) => tagById.get(id)?.name).filter(Boolean).slice(0, 3).join(" · ") || "未打标签"}</span></div><div className="assetlib-order-actions"><button aria-label={`上移 ${asset.name}`} disabled={index === 0} onClick={() => reorderProject(index, index - 1)}><ArrowUp size={13} /></button><button aria-label={`下移 ${asset.name}`} disabled={index === projectAssetIds.length - 1} onClick={() => reorderProject(index, index + 1)}><ArrowDown size={13} /></button><button aria-label={`从内容中移除 ${asset.name}`} onClick={() => setProjectAssetIds((current) => current.filter((id) => id !== assetId))}><X size={13} /></button></div></article>; })}</div>}<footer><div><CheckCircle2 size={14} /><span>保存后，每张图片的使用记录会自动更新。</span></div><button className="secondary-button" disabled={!projectId || !projectAssetIds.length} onClick={() => void exportProject()}><Download size={14} />导出排序图片包</button></footer></main></div>}
+
+      {tagDialogOpen && <div className="assetlib-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !savingLabels && setTagDialogOpen(false)}><div className="assetlib-modal" role="dialog" aria-modal="true" aria-labelledby="assetlib-tag-dialog-title"><header><div><span>人工批量打标</span><h3 id="assetlib-tag-dialog-title">整理 {selectedIds.length} 张图片</h3></div><button aria-label="关闭" disabled={savingLabels} onClick={() => setTagDialogOpen(false)}><X size={15} /></button></header><label className="assetlib-role-field"><span>图片默认用途</span><select value={batchRole} onChange={(event) => setBatchRole(event.target.value as AssetRole | "keep")}><option value="keep">保持原用途</option><option value="unspecified">暂不确定</option><option value="main">主图素材</option><option value="secondary">次图素材</option></select></label><div className="assetlib-modal-tags">{data.tagGroups.map((group) => { const tags = activeTags.filter((tag) => tag.groupId === group.id); if (!tags.length) return null; return <section key={group.id}><strong style={{ color: group.color }}>{group.name}</strong><div>{tags.map((tag) => { const checked = batchTagIds.includes(tag.id); return <button className={checked ? "selected" : ""} key={tag.id} onClick={() => setBatchTagIds((current) => checked ? current.filter((id) => id !== tag.id) : [...current, tag.id])}><span>{checked && <Check size={11} />}</span>#{tag.name}</button>; })}</div></section>; })}{!activeTags.length && <p>还没有标签。请先前往“标签管理”创建标签。</p>}</div><footer><button className="secondary-button" disabled={savingLabels} onClick={() => setTagDialogOpen(false)}>取消</button><button className="primary-button" disabled={savingLabels} onClick={() => void saveBatchLabels()}>{savingLabels ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}保存标签</button></footer></div></div>}
+
+      {detailAsset && <div className="assetlib-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDetailId("")}><div className="assetlib-detail" role="dialog" aria-modal="true" aria-labelledby="assetlib-detail-title"><header><div><span>图片详情与使用记录</span><h3 id="assetlib-detail-title">{detailAsset.name}</h3></div><button aria-label="关闭" onClick={() => setDetailId("")}><X size={15} /></button></header><div className="assetlib-detail-body"><div className="assetlib-detail-preview"><img src={`${runnerUrl}/api/library/assets/${detailAsset.id}/file`} alt={detailAsset.name} /></div><aside><dl><div><dt>尺寸</dt><dd>{detailAsset.width && detailAsset.height ? `${detailAsset.width} × ${detailAsset.height}` : "未识别"}</dd></div><div><dt>大小</dt><dd>{formatBytes(detailAsset.size)}</dd></div><div><dt>上传时间</dt><dd>{formatDate(detailAsset.uploadedAt)}</dd></div><div><dt>来源</dt><dd>{detailAsset.source || "本地上传"}</dd></div></dl><section><strong>默认用途</strong><div className="assetlib-detail-roles">{(["main", "secondary", "unspecified"] as AssetRole[]).map((role) => <button className={detailAsset.defaultRole === role ? "active" : ""} key={role} onClick={() => void updateSingleAsset({ defaultRole: role })}>{roleLabel(role)}</button>)}</div></section><section><strong>图片标签</strong><div className="assetlib-detail-tags">{activeTags.map((tag) => { const checked = detailAsset.tagIds.includes(tag.id); return <button className={checked ? "active" : ""} key={tag.id} onClick={() => void updateSingleAsset(checked ? { removeTagIds: [tag.id] } : { addTagIds: [tag.id] })}>#{tag.name}</button>; })}{!activeTags.length && <span>请先在标签管理中创建标签</span>}</div></section><section><strong>使用记录 · {detailAsset.usageCount} 次</strong>{detailAsset.usages.length ? <div className="assetlib-usage-list">{detailAsset.usages.map((usage) => <button key={`${usage.projectId}-${usage.position}`} onClick={() => { const project = data.projects.find((item) => item.id === usage.projectId); if (project) { setDetailId(""); openProject(project); } }}><div><strong>{usage.title}</strong><span>第 {usage.position} 张 · {usage.role === "main" ? "主图" : "次图"}</span></div><small>{formatDate(usage.updatedAt)}</small></button>)}</div> : <p className="assetlib-no-usage">这张图片还没有被内容项目使用。</p>}</section><button className="primary-button assetlib-detail-add" onClick={() => { addToProject([detailAsset.id]); setDetailId(""); }}><Plus size={14} />加入内容拼装台</button></aside></div></div></div>}
     </section>
   );
 }

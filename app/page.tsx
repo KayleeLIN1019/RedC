@@ -23,6 +23,7 @@ import {
   LogIn,
   MessageSquareWarning,
   PauseCircle,
+  Paintbrush,
   Plus,
   Radar,
   RefreshCw,
@@ -40,12 +41,14 @@ import {
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ImageEditor from "./image-editor";
 import MaterialCenter from "./material-center";
 
 type BusinessId = "feed" | "ip";
 type PageId =
   | "accounts"
   | "materials"
+  | "designer"
   | "library"
   | "draft"
   | "review"
@@ -58,10 +61,70 @@ type PageId =
 type Account = {
   id: string;
   name: string;
+  platformName?: string;
+  xhsId?: string;
   business: BusinessId;
   loginStatus: "connected" | "disconnected" | "awaiting_login" | "blocked";
   health: string;
   lastChecked?: string;
+};
+
+type CreatorNote = {
+  key: string;
+  title: string;
+  publishedAt: string;
+  views: number;
+  likes: number;
+  comments: number;
+  collects: number;
+  shares: number;
+  status: string;
+};
+
+type CommentSignal = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  noteKey: string;
+  noteTitle: string;
+  publishedAt: string;
+  commentCount: number;
+  acknowledgedCount: number;
+  newCount: number;
+  source: string;
+};
+
+type CreatorSnapshot = {
+  accountId: string;
+  business: BusinessId;
+  accountName: string;
+  profile: {
+    name: string;
+    following: number | null;
+    followers: number | null;
+    likesAndCollects: number | null;
+    xhsId: string;
+  };
+  period: string;
+  metrics: {
+    exposure: number | null;
+    views: number | null;
+    clickRate: string;
+    completionRate: string;
+    likes: number | null;
+    comments: number | null;
+    collects: number | null;
+    shares: number | null;
+    followerGrowth: number | null;
+    profileVisitors: number | null;
+  };
+  totalNotes: number;
+  collectedNotes: number;
+  notes: CreatorNote[];
+  commentSignals: CommentSignal[];
+  privateMessages: { status: string; reason: string };
+  source: string;
+  syncedAt: string;
 };
 
 type ContentItem = {
@@ -151,6 +214,7 @@ const menuItems: Array<{
 }> = [
   { id: "accounts", label: "账号与登录", icon: LogIn },
   { id: "materials", label: "素材中心", icon: HardDrive },
+  { id: "designer", label: "图片设计", icon: Paintbrush },
   { id: "library", label: "内容库", icon: FileStack },
   { id: "draft", label: "发布草稿台", icon: FilePenLine },
   { id: "review", label: "内容审查", icon: ClipboardCheck },
@@ -369,13 +433,15 @@ export default function Home() {
   const [contentItems, setContentItems] = useState<ContentItem[]>(seedContentItems);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [draftEditor, setDraftEditor] = useState<Draft>(() => newDraft("feed"));
+  const [designerSeed, setDesignerSeed] = useState<{ src: string; name: string } | null>(null);
   const [selectedContentId, setSelectedContentId] = useState("IF-0821");
   const [reviewState, setReviewState] = useState<Record<string, ContentItem["status"]>>({});
   const [competitors, setCompetitors] = useState(() => normalizeCompetitorData(competitorSeeds));
   const [competitorQuery, setCompetitorQuery] = useState("");
   const [syncingProfiles, setSyncingProfiles] = useState<string[]>([]);
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null);
-  const [visibleMessageIds, setVisibleMessageIds] = useState(["login", "comment", "dm"]);
+  const [creatorSnapshots, setCreatorSnapshots] = useState<CreatorSnapshot[]>([]);
+  const [syncingCreatorData, setSyncingCreatorData] = useState(false);
   const [toast, setToast] = useState("");
   const [busyAccount, setBusyAccount] = useState("");
   const [publishForm, setPublishForm] = useState({
@@ -409,6 +475,21 @@ export default function Home() {
       if (Array.isArray(taskData.tasks)) setPublishTasks(taskData.tasks);
     } catch {
       setRunnerOnline(false);
+    }
+  }, []);
+
+  const loadCreatorData = useCallback(async (targetBusiness: BusinessId) => {
+    try {
+      const data = await runnerRequest(`/api/creator-data?business=${targetBusiness}`);
+      if (Array.isArray(data.snapshots)) setCreatorSnapshots(data.snapshots);
+      if (Array.isArray(data.accounts)) {
+        setAccounts((current) => current.map((account) => {
+          const live = data.accounts.find((item: Account) => item.id === account.id);
+          return live ? { ...account, ...live } : account;
+        }));
+      }
+    } catch {
+      // The page will show the runner connection state instead of fabricated metrics.
     }
   }, []);
 
@@ -482,6 +563,12 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [business, contentItems]);
 
+  useEffect(() => {
+    if (!runnerOnline || !["messages", "analytics"].includes(page)) return;
+    const timer = window.setTimeout(() => void loadCreatorData(business), 0);
+    return () => window.clearTimeout(timer);
+  }, [business, loadCreatorData, page, runnerOnline]);
+
   const currentAccounts = accounts.filter((item) => item.business === business);
   const currentContent = contentItems.filter((item) => item.business === business);
   const selectedContent =
@@ -534,6 +621,57 @@ export default function Home() {
       showToast(error instanceof Error ? error.message : "检查失败");
     } finally {
       setBusyAccount("");
+    }
+  }
+
+  async function syncCreatorData() {
+    setSyncingCreatorData(true);
+    try {
+      const data = await runnerRequest("/api/creator-data/sync", {
+        method: "POST",
+        body: JSON.stringify({ business }),
+      });
+      if (Array.isArray(data.snapshots)) setCreatorSnapshots(data.snapshots);
+      if (Array.isArray(data.accounts)) {
+        setAccounts((current) => current.map((account) => {
+          const live = data.accounts.find((item: Account) => item.id === account.id);
+          return live ? { ...account, ...live } : account;
+        }));
+      }
+      const succeeded = Array.isArray(data.results) ? data.results.filter((item: { ok: boolean }) => item.ok).length : 0;
+      const failed = Array.isArray(data.results) ? data.results.length - succeeded : 0;
+      showToast(`真实后台同步完成：${succeeded} 个成功${failed ? `，${failed} 个未连接` : ""}`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "小红书后台同步失败");
+    } finally {
+      setSyncingCreatorData(false);
+    }
+  }
+
+  async function openNoteManager(accountId: string) {
+    try {
+      const result = await runnerRequest(`/api/accounts/${accountId}/open-note-manager`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showToast(result.message || "已打开小红书笔记管理");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法打开笔记管理");
+    }
+  }
+
+  async function acknowledgeComment(signal: CommentSignal) {
+    try {
+      await runnerRequest("/api/creator-data/messages/ack", {
+        method: "POST",
+        body: JSON.stringify({ accountId: signal.accountId, noteKey: signal.noteKey, commentCount: signal.commentCount }),
+      });
+      setCreatorSnapshots((current) => current.map((snapshot) => snapshot.accountId === signal.accountId
+        ? { ...snapshot, commentSignals: snapshot.commentSignals.filter((item) => item.id !== signal.id) }
+        : snapshot));
+      showToast("已标记为已处理；有新增评论时会再次提醒");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "标记失败");
     }
   }
 
@@ -771,25 +909,45 @@ export default function Home() {
     showToast("草稿已带入发布计划，请核对后确认");
   }
 
-  function downloadWeeklyReport() {
+  function downloadCreatorReport() {
+    const currentSnapshots = creatorSnapshots.filter((snapshot) => snapshot.business === business);
     const rows = [
-      ["业务", "发布数", "有效咨询", "转化率"],
-      [businessMeta[business].name, business === "feed" ? "186" : "24", business === "feed" ? "41" : "9", business === "feed" ? "2.8%" : "--"],
+      ["账号", "标题", "发布时间", "观看", "点赞", "评论", "收藏", "分享", "状态"],
+      ...currentSnapshots.flatMap((snapshot) => snapshot.notes.map((note) => [snapshot.accountName, note.title, note.publishedAt, note.views, note.likes, note.comments, note.collects, note.shares, note.status])),
     ];
-    const csv = rows.map((row) => row.join(",")).join("\n");
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${businessMeta[business].name}-样例周报.csv`;
+    anchor.download = `${businessMeta[business].name}-小红书真实数据.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
-    showToast("样例周报已导出");
+    showToast("真实笔记数据已导出");
   }
 
   const activeMeta = businessMeta[business];
   const currentTasks = publishTasks.filter((task) => task.business === business);
   const currentDrafts = drafts.filter((draft) => draft.business === business);
   const draftImagePaths = draftEditor.images.split("\n").map((item) => item.trim()).filter(Boolean);
+  const currentSnapshots = creatorSnapshots.filter((snapshot) => snapshot.business === business);
+  const currentCreatorNotes = currentSnapshots.flatMap((snapshot) => snapshot.notes.map((note) => ({ ...note, accountId: snapshot.accountId, accountName: snapshot.accountName }))).sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+  const currentCommentSignals = currentSnapshots.flatMap((snapshot) => snapshot.commentSignals);
+  const disconnectedAccounts = currentAccounts.filter((account) => account.loginStatus !== "connected");
+  const currentMessageCount = currentCommentSignals.length + disconnectedAccounts.length;
+  const creatorTotals = currentSnapshots.reduce((totals, snapshot) => ({
+    notes: totals.notes + snapshot.totalNotes,
+    exposure: totals.exposure + Number(snapshot.metrics.exposure || 0),
+    views: totals.views + Number(snapshot.metrics.views || 0),
+    interactions: totals.interactions + Number(snapshot.metrics.likes || 0) + Number(snapshot.metrics.comments || 0) + Number(snapshot.metrics.collects || 0) + Number(snapshot.metrics.shares || 0),
+  }), { notes: 0, exposure: 0, views: 0, interactions: 0 });
+  const messageCountByBusiness = (["feed", "ip"] as BusinessId[]).reduce<Record<BusinessId, number>>((counts, businessId) => {
+    const accountAlerts = accounts.filter((account) => account.business === businessId && account.loginStatus !== "connected").length;
+    const commentAlerts = creatorSnapshots
+      .filter((snapshot) => snapshot.business === businessId)
+      .reduce((total, snapshot) => total + snapshot.commentSignals.length, 0);
+    counts[businessId] = accountAlerts + commentAlerts;
+    return counts;
+  }, { feed: 0, ip: 0 });
 
   return (
     <main className="app-shell">
@@ -834,7 +992,7 @@ export default function Home() {
                           >
                             <Icon size={15} />
                             <span>{item.label}</span>
-                            {item.id === "messages" && <em>3</em>}
+                            {item.id === "messages" && messageCountByBusiness[businessId] > 0 && <em>{messageCountByBusiness[businessId]}</em>}
                           </button>
                         );
                       })}
@@ -861,7 +1019,7 @@ export default function Home() {
         <div className="content-area">
           {page === "accounts" && (
             <section>
-              <PageHeader title="账号与登录" subtitle="真实登录在本机 Chrome 中完成；系统不保存密码、短信验证码或扫码凭据。" action={<span className="header-note">当前业务固定配置 2 个账号位</span>} />
+              <PageHeader title="账号与登录" subtitle="真实登录在独立 Chrome 会话中完成；系统不会在后台自动打开或跳转页面。" action={<span className="header-note">当前业务固定配置 2 个账号位</span>} />
               <div className={`connection-banner ${runnerOnline ? "ok" : "warn"}`}>
                 <div>{runnerOnline ? <CheckCircle2 size={19} /> : <AlertTriangle size={19} />}<div><strong>{runnerOnline ? "本地执行器运行正常" : "本地执行器尚未连接"}</strong><span>{runnerOnline ? "点击“发起登录”会打开独立 Chrome 会话，完成扫码后返回此处检查状态。" : "网页界面已运行，但真实登录和自动发布必须由本机 runner 执行。"}</span></div></div>
                 <code>{RUNNER_URL}</code>
@@ -869,9 +1027,9 @@ export default function Home() {
               <div className="account-grid">
                 {currentAccounts.map((account) => (
                   <article className="account-card" key={account.id}>
-                    <div className="account-card-head"><div className="account-avatar">{account.name.slice(-1)}</div><span className={`status-pill ${account.loginStatus}`}>{statusLabel(account.loginStatus)}</span></div>
-                    <h3>{account.name}</h3>
-                    <p>{account.id}</p>
+                    <div className="account-card-head"><div className="account-avatar">{(account.platformName || account.name).slice(-1)}</div><span className={`status-pill ${account.loginStatus}`}>{statusLabel(account.loginStatus)}</span></div>
+                    <h3>{account.platformName || account.name}</h3>
+                    <p>{account.platformName ? `${account.name} · 小红书号 ${account.xhsId || "读取中"}` : account.id}</p>
                     <dl><div><dt>账号健康</dt><dd>{account.health}</dd></div><div><dt>最近检查</dt><dd>{account.lastChecked || "尚未检查"}</dd></div><div><dt>自动发布</dt><dd>{account.loginStatus === "connected" ? "可开启" : "已暂停"}</dd></div></dl>
                     <div className="card-actions">
                       <button className="primary-button small" disabled={!runnerOnline || busyAccount === account.id} onClick={() => loginAccount(account.id)}><LogIn size={14} />{account.loginStatus === "connected" ? "重新登录" : "发起登录"}</button>
@@ -889,6 +1047,20 @@ export default function Home() {
               business={business}
               runnerOnline={runnerOnline}
               runnerUrl={RUNNER_URL}
+              onUseImage={addMaterialToDraft}
+              onEditImage={(src, name) => { setDesignerSeed({ src, name }); setPage("designer"); }}
+              onOpenDraft={() => setPage("draft")}
+              showToast={showToast}
+            />
+          )}
+
+          {page === "designer" && (
+            <ImageEditor
+              business={business}
+              runnerOnline={runnerOnline}
+              runnerUrl={RUNNER_URL}
+              seedImage={designerSeed}
+              onSeedConsumed={() => setDesignerSeed(null)}
               onUseImage={addMaterialToDraft}
               onOpenDraft={() => setPage("draft")}
               showToast={showToast}
@@ -910,7 +1082,7 @@ export default function Home() {
 
           {page === "draft" && (
             <section>
-              <PageHeader title="发布草稿台" subtitle="编辑标题、正文和图片顺序，右侧实时预览小红书图文笔记。" action={<div className="draft-header-actions"><button className="secondary-button" onClick={() => setDraftEditor(newDraft(business))}><Plus size={15}/>新建空白</button><button className="primary-button" onClick={saveDraft}><Save size={15}/>保存草稿</button></div>} />
+              <PageHeader title="发布草稿台" subtitle="编辑标题、正文和图片顺序，右侧实时预览小红书图文笔记。" action={<div className="draft-header-actions"><button className="secondary-button" onClick={() => setPage("designer")}><Paintbrush size={15}/>去作图</button><button className="secondary-button" onClick={() => setDraftEditor(newDraft(business))}><Plus size={15}/>新建空白</button><button className="primary-button" onClick={saveDraft}><Save size={15}/>保存草稿</button></div>} />
               <div className="draft-workbench">
                 <aside className="draft-list-panel">
                   <div className="panel-title"><div><strong>我的草稿</strong><span>{currentDrafts.length} 条</span></div></div>
@@ -920,7 +1092,7 @@ export default function Home() {
                 <div className="draft-editor-panel">
                   <div className="panel-title"><div><strong>编辑内容</strong><span>自动统计标题和正文长度</span></div><StatusTag value="本地草稿"/></div>
                   <div className="draft-form">
-                    <label><span>发布账号</span><select value={draftEditor.accountId} onChange={(event) => setDraftEditor((current) => ({...current, accountId:event.target.value}))}>{currentAccounts.map((account)=><option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
+                    <label><span>发布账号</span><select value={draftEditor.accountId} onChange={(event) => setDraftEditor((current) => ({...current, accountId:event.target.value}))}>{currentAccounts.map((account)=><option key={account.id} value={account.id}>{account.platformName || account.name}</option>)}</select></label>
                     <label><span>计划发布时间</span><input type="datetime-local" value={draftEditor.scheduledAt} onChange={(event) => setDraftEditor((current) => ({...current, scheduledAt:event.target.value}))}/></label>
                     <label className="full"><span>笔记标题 <em>{draftEditor.title.length}/20</em></span><input maxLength={20} placeholder="输入有明确利益点的标题" value={draftEditor.title} onChange={(event) => setDraftEditor((current) => ({...current, title:event.target.value}))}/></label>
                     <label className="full"><span>正文 <em>{draftEditor.content.length} 字</em></span><textarea rows={10} placeholder="输入正文、CTA 和话题标签" value={draftEditor.content} onChange={(event) => setDraftEditor((current) => ({...current, content:event.target.value}))}/></label>
@@ -973,7 +1145,7 @@ export default function Home() {
               <div className="publish-composer">
                 <div className="composer-head"><div><Send size={18} /><div><strong>创建真实发布任务</strong><span>发布前会再次确认；图片必须填写本机绝对路径。</span></div></div><span className="live-badge">LOCAL RUNNER</span></div>
                 <div className="form-grid">
-                  <label><span>发布账号</span><select value={publishForm.accountId} onChange={(event) => setPublishForm((current) => ({ ...current, accountId: event.target.value }))}>{currentAccounts.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+                  <label><span>发布账号</span><select value={publishForm.accountId} onChange={(event) => setPublishForm((current) => ({ ...current, accountId: event.target.value }))}>{currentAccounts.map((item) => <option value={item.id} key={item.id}>{item.platformName || item.name}</option>)}</select></label>
                   <label><span>计划时间（留空立即执行）</span><input type="datetime-local" value={publishForm.scheduledAt} onChange={(event) => setPublishForm((current) => ({ ...current, scheduledAt: event.target.value }))} /></label>
                   <label className="full"><span>笔记标题</span><input value={publishForm.title} maxLength={20} onChange={(event) => setPublishForm((current) => ({ ...current, title: event.target.value }))} /></label>
                   <label className="full"><span>正文</span><textarea rows={5} value={publishForm.content} onChange={(event) => setPublishForm((current) => ({ ...current, content: event.target.value }))} /></label>
@@ -996,24 +1168,26 @@ export default function Home() {
 
           {page === "messages" && (
             <section>
-              <PageHeader title="待处理消息" subtitle="只把需要你本人、运营或账号所有者处理的事项放到这里。" action={<button className="secondary-button" onClick={() => { setVisibleMessageIds([]); showToast("样例消息已全部清除"); }}><CheckCircle2 size={15} />清除全部样例</button>} />
-              <div className="sample-notice"><SampleBadge/><span>以下消息用于展示未来的评论、私信和账号异常提醒方式。</span></div>
-              <div className="inbox-tabs"><button className="active" onClick={() => showToast("正在显示全部样例消息")}>全部 <span>{visibleMessageIds.length}</span></button><button onClick={() => showToast("评论与私信筛选为演示交互")}>评论与私信 <span>{visibleMessageIds.filter((id)=>id!=="login").length}</span></button><button onClick={() => showToast("账号异常筛选为演示交互")}>账号异常 <span>{visibleMessageIds.includes("login") ? 1 : 0}</span></button></div>
+              <PageHeader title="待处理消息" subtitle="只显示真实数据；仅在你点击同步时访问小红书，不会自动跳转 Chrome。" action={<button className="secondary-button" disabled={!runnerOnline || syncingCreatorData} onClick={syncCreatorData}><RefreshCw className={syncingCreatorData ? "spin" : ""} size={15} />{syncingCreatorData ? "正在同步" : "手动同步小红书"}</button>} />
+              <div className="live-source-banner"><CheckCircle2 size={17}/><div><strong>数据来源：小红书创作服务平台</strong><span>{currentSnapshots.length ? `最近同步 ${formatSyncTime(currentSnapshots[0].syncedAt)}` : "尚未完成首次同步"}</span></div></div>
+              <div className="inbox-tabs"><button className="active">全部 <span>{currentMessageCount}</span></button><button>评论提醒 <span>{currentCommentSignals.length}</span></button><button>账号连接 <span>{disconnectedAccounts.length}</span></button></div>
               <div className="message-list">
-                {visibleMessageIds.includes("login") && <MessageRow priority="P0" icon={<AlertTriangle size={17} />} title="信息流账号 B 需要重新登录" detail="发布队列已自动暂停，请在账号登录页完成设备验证。" action="去处理" onAction={() => setPage("accounts")} onDelete={() => setVisibleMessageIds((ids)=>ids.filter((id)=>id!=="login"))} />}
-                {visibleMessageIds.includes("comment") && <MessageRow priority="P1" icon={<HeartHandshake size={17} />} title="评论需要人工回复：可以预约上门量房吗？" detail="印堂设计师 IP · 建议回复线下量房流程，不要强调线上领取方案。" action="查看说明" onAction={() => showToast("真实评论接口尚未接入，此条为样例")} onDelete={() => setVisibleMessageIds((ids)=>ids.filter((id)=>id!=="comment"))} />}
-                {visibleMessageIds.includes("dm") && <MessageRow priority="P1" icon={<MessageSquareWarning size={17} />} title="私信需要本人确认报价范围" detail="用户询问套餐价格；建议改用个性化清单式报价话术。" action="生成草稿" onAction={() => { setDraftEditor({...newDraft("ip"), title:"装修报价为什么要做清单", content:"报价不是一个套餐数字，而是根据现场量房和需求形成个性化清单。"}); setBusiness("ip"); setPage("draft"); }} onDelete={() => setVisibleMessageIds((ids)=>ids.filter((id)=>id!=="dm"))} />}
-                {visibleMessageIds.length === 0 && <div className="table-empty">当前没有待处理消息。</div>}
+                {disconnectedAccounts.map((account) => <LiveMessageRow key={account.id} priority="P0" icon={<AlertTriangle size={17}/>} title={`${account.platformName || account.name} 尚未连接`} detail={`${account.health}；未登录时系统不会显示该账号的笔记数据或消息。`} source="本地账号连接状态" actions={<button className="secondary-button" onClick={() => setPage("accounts")}>去登录<ChevronRight size={14}/></button>}/>) }
+                {currentCommentSignals.map((signal) => <LiveMessageRow key={signal.id} priority="P1" icon={<HeartHandshake size={17}/>} title={`${signal.accountName}：检测到 ${signal.newCount} 条待确认评论`} detail={`《${signal.noteTitle}》目前共 ${signal.commentCount} 条评论；请在笔记管理中确认是否已回复。`} source={signal.source} actions={<><button className="secondary-button" onClick={() => openNoteManager(signal.accountId)}>打开后台<ExternalLink size={13}/></button><button className="icon-button" title="标记已处理" onClick={() => acknowledgeComment(signal)}><CheckCircle2 size={15}/></button></>}/>) }
+                {currentMessageCount === 0 && <div className="table-empty">当前没有从真实后台检测到待处理评论或账号异常。</div>}
               </div>
+              <div className="access-limit-card"><MessageSquareWarning size={18}/><div><strong>私信正文尚未授权</strong><p>{currentSnapshots[0]?.privateMessages.reason || "小红书创作服务平台网页端不提供私信正文。连接账号后，当前页面仍只会展示可核验的后台数据。"}</p></div><StatusTag value="未授权"/></div>
             </section>
           )}
 
           {page === "analytics" && (
             <section>
-              <PageHeader title="数据分析" subtitle={business === "feed" ? "重点查看发布量、私信和有效咨询转化率。" : "重点查看内容一致性、高质量互动和线下量房转化。"} action={<button className="secondary-button" onClick={downloadWeeklyReport}><Upload size={15} />导出样例周报</button>} />
-              <div className="sample-notice"><SampleBadge/><span>当前看板为演示数据；接入账号数据采集后将自动替换。</span></div>
-              <div className="metric-grid"><Metric label="本月发布" value={business === "feed" ? "186" : "24"} change="目标完成 62%" /><Metric label={business === "feed" ? "私信转化率" : "高质量互动"} value={business === "feed" ? "2.8%" : "37"} change="较上周 +12%" /><Metric label={business === "feed" ? "有效咨询" : "预约量房"} value={business === "feed" ? "41" : "9"} change="本月累计" /><Metric label="账号健康" value="3 / 4" change="1 个待验证" /></div>
-              <div className="analytics-grid"><article className="chart-card"><div className="section-title"><div><h3>近 7 天发布与转化</h3><span>当前业务独立统计</span></div><button className="text-button" onClick={downloadWeeklyReport}>下载明细</button></div><div className="bar-chart">{[44,68,51,82,73,91,77].map((value,index)=><div key={index}><span style={{height:`${value}%`}} /><small>{["一","二","三","四","五","六","日"][index]}</small></div>)}</div></article><article className="insight-card"><Sparkles size={20}/><h3>AI 分发建议</h3><p>{business === "feed" ? "账号 A 的晚间户型对比内容转化高于均值 31%，建议下周增加 8 篇，并继续复用橙色大字封面。" : "实景案例 + 报价清单 + 签约现场的组合互动稳定，建议保持每周 2 篇，并增加设计师本人回复。"}</p><button className="secondary-button" onClick={() => showToast("该建议基于当前样例数据，仅用于展示")}>查看样例证据</button></article></div>
+              <PageHeader title="数据分析" subtitle="读取真实创作后台数据；只有你主动点击同步时才会访问小红书页面。" action={<div className="page-header-actions"><button className="secondary-button" disabled={!currentCreatorNotes.length} onClick={downloadCreatorReport}><Upload size={15}/>导出真实数据</button><button className="primary-button" disabled={!runnerOnline || syncingCreatorData} onClick={syncCreatorData}><RefreshCw className={syncingCreatorData ? "spin" : ""} size={15}/>{syncingCreatorData ? "正在读取后台" : "手动同步小红书"}</button></div>} />
+              <div className="live-source-banner"><CheckCircle2 size={17}/><div><strong>数据来源：小红书创作服务平台</strong><span>{currentSnapshots.length ? `${currentSnapshots.map((snapshot) => snapshot.accountName).join("、")} · ${currentSnapshots[0].period || "后台实时数据"} · 最近同步 ${formatSyncTime(currentSnapshots[0].syncedAt)}` : "当前业务尚无已同步账号；请先登录并点击同步。"}</span></div></div>
+              <div className="metric-grid"><Metric label="全部已发布笔记" value={formatMetric(creatorTotals.notes)} change={`${currentCreatorNotes.length} 篇已读取到明细`} /><Metric label="周期曝光" value={formatMetric(creatorTotals.exposure)} change={currentSnapshots[0]?.period || "等待同步"} /><Metric label="周期观看" value={formatMetric(creatorTotals.views)} change={`封面点击率 ${currentSnapshots[0]?.metrics.clickRate || "--"}`} /><Metric label="周期互动" value={formatMetric(creatorTotals.interactions)} change="点赞 + 评论 + 收藏 + 分享" /></div>
+              <div className="account-data-strip">{currentAccounts.map((account) => { const snapshot = currentSnapshots.find((item) => item.accountId === account.id); return <article key={account.id} className={snapshot ? "connected" : ""}><span className={`status-dot ${snapshot ? "online" : ""}`}/><div><strong>{snapshot?.accountName || account.platformName || account.name}</strong><small>{snapshot ? `${snapshot.collectedNotes}/${snapshot.totalNotes} 篇明细 · 粉丝 ${formatMetric(snapshot.profile.followers)}` : `${account.health} · 暂无后台数据`}</small></div><StatusTag value={snapshot ? "已同步" : "未连接"}/></article>; })}</div>
+              <div className="section-title"><div><h3>全部笔记明细</h3><span>{currentCreatorNotes.length ? `已读取 ${currentCreatorNotes.length} 篇；数据按发布时间从新到旧排列` : "登录账号并同步后显示真实笔记"}</span></div></div>
+              <div className="live-note-table"><div className="live-note-head"><span>账号与笔记</span><span>发布时间</span><span>观看</span><span>点赞</span><span>评论</span><span>收藏</span><span>分享</span><span>状态</span></div>{currentCreatorNotes.map((note) => <div className="live-note-row" key={`${note.accountId}-${note.key}`}><div><strong>{note.title}</strong><small>{note.accountName}</small></div><span>{note.publishedAt}</span><span>{formatMetric(note.views)}</span><span>{formatMetric(note.likes)}</span><span className={note.comments > 0 ? "attention" : ""}>{formatMetric(note.comments)}</span><span>{formatMetric(note.collects)}</span><span>{formatMetric(note.shares)}</span><StatusTag value={note.status}/></div>)}{currentCreatorNotes.length === 0 && <div className="table-empty">没有用虚假数据填充。当前尚未读取到已连接账号的笔记明细。</div>}</div>
             </section>
           )}
 
@@ -1046,7 +1220,7 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
 }
 
 function StatusTag({ value }: { value: string }) {
-  const tone = value.includes("通过") || value.includes("更新") || value.includes("正常") ? "success" : value.includes("修改") || value.includes("异常") || value.includes("重试") ? "danger" : "neutral";
+  const tone = value.includes("通过") || value.includes("更新") || value.includes("正常") || value === "已同步" || value === "已发布" ? "success" : value.includes("修改") || value.includes("异常") || value.includes("重试") || value.includes("未连接") ? "danger" : "neutral";
   return <span className={`tag ${tone}`}>{value}</span>;
 }
 
@@ -1090,8 +1264,19 @@ function formatTaskTime(value: string) {
   }).format(date);
 }
 
-function MessageRow({ priority, icon, title, detail, action, onAction, onDelete }: { priority: string; icon: React.ReactNode; title: string; detail: string; action: string; onAction: () => void; onDelete: () => void }) {
-  return <article className="message-row"><span className={`priority ${priority.toLowerCase()}`}>{priority}</span><span className="message-icon">{icon}</span><div><div className="title-with-badge"><strong>{title}</strong><SampleBadge/></div><p>{detail}</p><small>演示消息</small></div><div className="row-actions"><button className="secondary-button" onClick={onAction}>{action}<ChevronRight size={14}/></button><button className="icon-button danger-icon" title="删除样例" onClick={onDelete}><Trash2 size={14}/></button></div></article>;
+function formatMetric(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "--";
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatSyncTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+}
+
+function LiveMessageRow({ priority, icon, title, detail, source, actions }: { priority: string; icon: React.ReactNode; title: string; detail: string; source: string; actions: React.ReactNode }) {
+  return <article className="message-row"><span className={`priority ${priority.toLowerCase()}`}>{priority}</span><span className="message-icon">{icon}</span><div><strong>{title}</strong><p>{detail}</p><small>{source}</small></div><div className="row-actions">{actions}</div></article>;
 }
 
 function Metric({ label, value, change }: { label: string; value: string; change: string }) {
