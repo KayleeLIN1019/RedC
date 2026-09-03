@@ -67,9 +67,10 @@ test("wires the 3:4 image editor, custom fonts, and draft export", async () => {
 });
 
 test("wires the persistent image library while retaining the Baidu cache service", async () => {
-  const [page, materialCenter, runner, materialService, readme, envExample] = await Promise.all([
+  const [page, materialCenter, styles, runner, materialService, readme, envExample] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/material-center.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../runner/server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../runner/baidu-materials.mjs", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
@@ -93,6 +94,9 @@ test("wires the persistent image library while retaining the Baidu cache service
   assert.match(materialCenter, /生成文件夹/);
   assert.match(materialCenter, /复用记录/);
   assert.match(materialCenter, /roleByAsset/);
+  assert.match(styles, /\.assetlib-preview[^}]*aspect-ratio:\s*3\/4/);
+  assert.match(styles, /\.assetlib-preview img[^}]*object-fit:\s*contain/);
+  assert.match(styles, /\.assetlib-project-picker-grid > button > div[^}]*aspect-ratio:\s*3\/4/);
   assert.match(runner, /\/api\/library\/upload/);
   assert.match(runner, /\/api\/library\/assets\/update/);
   assert.match(runner, /\/api\/library\/assets\/export/);

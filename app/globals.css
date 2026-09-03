@@ -636,8 +636,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .assetlib-card.selected { box-shadow: 0 0 0 2px #dce2e9,0 7px 18px rgba(42,51,63,.08); }
 .assetlib-card-check { position: absolute; z-index: 2; top: 8px; left: 8px; display: grid; width: 22px; height: 22px; place-items: center; color: #fff; background: rgba(255,255,255,.9); border: 1px solid rgba(160,169,180,.65); border-radius: 6px; box-shadow: 0 2px 7px rgba(30,36,44,.11); cursor: pointer; }
 .assetlib-card-check.selected { background: #596575; border-color: #596575; }
-.assetlib-preview { position: relative; display: block; width: 100%; aspect-ratio: 3/2; padding: 0; overflow: hidden; background: #eef0f3; border: 0; cursor: pointer; }
-.assetlib-preview img { width: 100%; height: 100%; object-fit: cover; transition: transform .2s ease; }
+.assetlib-preview { position: relative; display: block; width: 100%; aspect-ratio: 3/4; padding: 0; overflow: hidden; background: #eef0f3; border: 0; cursor: pointer; }
+.assetlib-preview img { width: 100%; height: 100%; object-fit: contain; transition: transform .2s ease; }
 .assetlib-card:hover .assetlib-preview img { transform: scale(1.02); }
 .assetlib-role,.assetlib-used { position: absolute; display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px; color: #fff; background: rgba(50,57,67,.82); border-radius: 5px; backdrop-filter: blur(5px); font-size: 7px; font-weight: 700; }
 .assetlib-role { right: 7px; bottom: 7px; }
@@ -731,8 +731,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .assetlib-project-picker-grid > button { min-width: 0; padding: 0 0 8px; overflow: hidden; color: #5d6672; background: #fff; border: 1px solid #e1e5e9; border-radius: 8px; cursor: pointer; text-align: left; }
 .assetlib-project-picker-grid > button:hover { border-color: #bdc7d1; transform: translateY(-1px); }
 .assetlib-project-picker-grid > button.chosen { border-color: #7d8da0; box-shadow: 0 0 0 2px #e2e7ed; }
-.assetlib-project-picker-grid > button > div { position: relative; aspect-ratio: 3/2; overflow: hidden; background: #edf0f3; }
-.assetlib-project-picker-grid img { width: 100%; height: 100%; object-fit: cover; }
+.assetlib-project-picker-grid > button > div { position: relative; aspect-ratio: 3/4; overflow: hidden; background: #edf0f3; }
+.assetlib-project-picker-grid img { width: 100%; height: 100%; object-fit: contain; }
 .assetlib-project-picker-grid i { position: absolute; top: 6px; left: 6px; display: grid; width: 21px; height: 21px; place-items: center; color: #fff; background: rgba(255,255,255,.9); border: 1px solid #cfd5dc; border-radius: 5px; font-style: normal; }
 .assetlib-project-picker-grid button.chosen i { background: #5e6c7e; border-color: #5e6c7e; }
 .assetlib-project-picker-grid strong,.assetlib-project-picker-grid small { display: block; overflow: hidden; margin: 7px 8px 0; text-overflow: ellipsis; white-space: nowrap; }
