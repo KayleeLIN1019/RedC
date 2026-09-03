@@ -213,7 +213,6 @@ const menuItems: Array<{
   ipOnly?: boolean;
 }> = [
   { id: "accounts", label: "账号与登录", icon: LogIn },
-  { id: "materials", label: "素材中心", icon: HardDrive },
   { id: "designer", label: "图片设计", icon: Paintbrush },
   { id: "library", label: "内容库", icon: FileStack },
   { id: "draft", label: "发布草稿台", icon: FilePenLine },
@@ -421,10 +420,10 @@ async function runnerRequest(path: string, init?: RequestInit) {
 }
 
 export default function Home() {
-  const [business, setBusiness] = useState<BusinessId>("feed");
-  const [page, setPage] = useState<PageId>("accounts");
+  const [business, setBusiness] = useState<BusinessId>("ip");
+  const [page, setPage] = useState<PageId>("materials");
   const [expanded, setExpanded] = useState<Record<BusinessId, boolean>>({
-    feed: true,
+    feed: false,
     ip: true,
   });
   const [runnerOnline, setRunnerOnline] = useState(false);
@@ -432,9 +431,9 @@ export default function Home() {
   const [publishTasks, setPublishTasks] = useState<PublishTask[]>([]);
   const [contentItems, setContentItems] = useState<ContentItem[]>(seedContentItems);
   const [drafts, setDrafts] = useState<Draft[]>([]);
-  const [draftEditor, setDraftEditor] = useState<Draft>(() => newDraft("feed"));
+  const [draftEditor, setDraftEditor] = useState<Draft>(() => newDraft("ip"));
   const [designerSeed, setDesignerSeed] = useState<{ src: string; name: string } | null>(null);
-  const [selectedContentId, setSelectedContentId] = useState("IF-0821");
+  const [selectedContentId, setSelectedContentId] = useState("IP-0318");
   const [reviewState, setReviewState] = useState<Record<string, ContentItem["status"]>>({});
   const [competitors, setCompetitors] = useState(() => normalizeCompetitorData(competitorSeeds));
   const [competitorQuery, setCompetitorQuery] = useState("");
@@ -445,10 +444,10 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [busyAccount, setBusyAccount] = useState("");
   const [publishForm, setPublishForm] = useState({
-    accountId: "feed-a",
-    title: "免费出图｜89㎡三室两厅这样改",
+    accountId: "ip-yintang",
+    title: "装修避坑｜这 3 个设计细节要提前定",
     content:
-      "本期是虚拟户型设计示例，重点优化玄关收纳、客餐厅动线和阳台利用。\n\n需要户型规划可以留言。\n\n#户型设计 #户型改造 #装修灵感",
+      "本期分享装修落地时最容易被忽略的设计细节，帮助你在开工前把动线、收纳和尺寸一次想清楚。",
     images: "",
     scheduledAt: "",
   });
@@ -926,6 +925,8 @@ export default function Home() {
   }
 
   const activeMeta = businessMeta[business];
+  const breadcrumbSection = page === "materials" ? "独立业务功能" : activeMeta.name;
+  const breadcrumbPage = page === "materials" ? "素材中心" : menuItems.find((item) => item.id === page)?.label;
   const currentTasks = publishTasks.filter((task) => task.business === business);
   const currentDrafts = drafts.filter((draft) => draft.business === business);
   const draftImagePaths = draftEditor.images.split("\n").map((item) => item.trim()).filter(Boolean);
@@ -957,14 +958,27 @@ export default function Home() {
           <div><strong>红序</strong><span>内容运营系统</span></div>
         </div>
 
-        <div className="nav-label">业务与功能</div>
+        <div className="nav-label">独立业务</div>
+        <button
+          className={`standalone-feature ${page === "materials" ? "active" : ""}`}
+          onClick={() => {
+            setBusiness("ip");
+            setPage("materials");
+          }}
+        >
+          <span className="business-icon green"><HardDrive size={16} /></span>
+          <span className="business-name"><strong>素材中心</strong><small>上传、打标、拼装与导出</small></span>
+          <ChevronRight size={15} />
+        </button>
+
+        <div className="nav-label business-section-label">个人 IP 业务</div>
         <nav className="business-nav" aria-label="业务与功能菜单">
-          {(["feed", "ip"] as BusinessId[]).map((businessId) => {
+          {(["ip"] as BusinessId[]).map((businessId) => {
             const meta = businessMeta[businessId];
             const BusinessIcon = meta.icon;
             const isExpanded = expanded[businessId];
             return (
-              <div className={`business-group ${business === businessId ? "active" : ""}`} key={businessId}>
+              <div className={`business-group ${business === businessId && page !== "materials" ? "active" : ""}`} key={businessId}>
                 <button
                   className="business-level-one"
                   onClick={() => {
@@ -1012,7 +1026,7 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div className="breadcrumb"><span>{activeMeta.name}</span><ChevronRight size={14} /><strong>{menuItems.find((item) => item.id === page)?.label}</strong></div>
+          <div className="breadcrumb"><span>{breadcrumbSection}</span><ChevronRight size={14} /><strong>{breadcrumbPage}</strong></div>
           <div className="top-actions"><button className="icon-button" title="刷新" onClick={refreshRunner}><RefreshCw size={16} /></button><button className="secondary-button" onClick={() => { setPage("accounts"); showToast(runnerOnline ? "前端与本地发布执行器均正常" : "前端正常，本地发布执行器未连接"); }}><Activity size={15} />系统状态</button></div>
         </header>
 

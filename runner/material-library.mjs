@@ -316,6 +316,32 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     return { zipName, folderPath: targetDir, count: copied.length };
   }
 
+  async function exportAssets(assetIds) {
+    const requestedIds = [...new Set(Array.isArray(assetIds) ? assetIds : [])];
+    const assets = requestedIds
+      .map((id) => state.assets.find((asset) => asset.id === id && !asset.archivedAt))
+      .filter(Boolean);
+    if (!assets.length) throw new Error("请至少选择一张可导出的图片");
+
+    const timestamp = now().toISOString().replace(/[:.]/g, "-");
+    const folderName = `素材批量导出-${timestamp}`;
+    const targetDir = path.join(exportsDir, folderName);
+    await fs.mkdir(targetDir, { recursive: true });
+
+    const copied = [];
+    for (let index = 0; index < assets.length; index += 1) {
+      const asset = assets[index];
+      const outputName = `${String(index + 1).padStart(2, "0")}-${safeFileName(asset.name)}`;
+      await fs.copyFile(path.join(originalsDir, asset.storedName), path.join(targetDir, outputName));
+      copied.push(outputName);
+    }
+
+    const zipName = `${folderName}.zip`;
+    const zipPath = path.join(exportsDir, zipName);
+    await execFileAsync("/usr/bin/zip", ["-q", "-j", zipPath, ...copied.map((name) => path.join(targetDir, name))]);
+    return { zipName, folderPath: targetDir, count: copied.length };
+  }
+
   async function exportFile(fileName) {
     const safeName = path.basename(fileName);
     if (safeName !== fileName || !safeName.endsWith(".zip")) throw new Error("导出文件不存在");
@@ -335,6 +361,7 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     updateAssets: (...args) => mutate(() => updateAssets(...args)),
     upsertProject: (...args) => mutate(() => upsertProject(...args)),
     exportProject,
+    exportAssets,
     exportFile,
   };
 }

@@ -31,6 +31,11 @@ button { color: inherit; }
 .brand strong { font-size: 15px; letter-spacing: .08em; }
 .brand span { color: #8c929c; font-size: 11px; }
 .nav-label { margin: 0 10px 8px; color: #9aa0a9; font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.business-section-label { margin-top: 16px; }
+.standalone-feature { display: flex; align-items: center; width: 100%; gap: 9px; min-height: 54px; padding: 9px; color: #59616c; background: transparent; border: 1px solid transparent; border-radius: 11px; cursor: pointer; text-align: left; }
+.standalone-feature:hover { background: #f1f4f2; }
+.standalone-feature.active { color: #344c40; background: #fff; border-color: #dce7e0; box-shadow: 0 4px 14px rgba(33,40,50,.045); }
+.business-icon.green { color: var(--green); background: var(--green-soft); }
 .business-nav { display: grid; gap: 8px; }
 .business-group { overflow: hidden; border: 1px solid transparent; border-radius: 11px; }
 .business-group.active { background: #fff; border-color: #e4e7eb; box-shadow: 0 4px 14px rgba(33,40,50,.035); }
@@ -607,6 +612,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .assetlib-tag-filter .assetlib-clear-filter { position: absolute; top: 8px; right: 9px; color: #8c6670; background: #fff6f7; border-color: #eedfe2; }
 .assetlib-selection { display: flex; min-height: 42px; align-items: center; gap: 8px; margin-bottom: 10px; padding: 5px 7px; color: #737b86; background: #f7f8fa; border: 1px solid #e5e8eb; border-radius: 8px; }
 .assetlib-selection > button { display: flex; min-height: 29px; align-items: center; gap: 6px; padding: 0 8px; color: #68727f; background: #fff; border: 1px solid #e1e4e8; border-radius: 6px; cursor: pointer; font-size: 8px; }
+.assetlib-selection > button:disabled { cursor: wait; opacity: .62; }
 .assetlib-selection > span { flex: 1; font-size: 8px; }
 .assetlib-selection > button.primary { color: #fff; background: #596575; border-color: #596575; }
 .assetlib-check { display: grid; width: 15px; height: 15px; place-items: center; color: #fff; border: 1px solid #cfd4da; border-radius: 4px; }

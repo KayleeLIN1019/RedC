@@ -129,6 +129,7 @@ export default function MaterialCenter({ business, runnerOnline, runnerUrl, show
   const [projectAssetIds, setProjectAssetIds] = useState<string[]>([]);
   const [projectStatus, setProjectStatus] = useState<"draft" | "completed">("draft");
   const [savingProject, setSavingProject] = useState(false);
+  const [exportingAssets, setExportingAssets] = useState(false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -314,6 +315,25 @@ export default function MaterialCenter({ business, runnerOnline, runnerUrl, show
     } catch (error) { showToast(error instanceof Error ? error.message : "导出失败"); }
   }
 
+  async function exportSelectedAssets() {
+    if (!selectedIds.length) { showToast("请先勾选需要导出的图片"); return; }
+    setExportingAssets(true);
+    try {
+      const result = await requestJson("/api/library/assets/export", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedIds }),
+      });
+      const anchor = document.createElement("a");
+      anchor.href = `${runnerUrl}${result.downloadUrl}`;
+      anchor.download = result.zipName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      showToast(result.message || `已导出 ${selectedIds.length} 张图片`);
+    } catch (error) { showToast(error instanceof Error ? error.message : "批量导出失败"); }
+    finally { setExportingAssets(false); }
+  }
+
   if (!runnerOnline) {
     return <section className="assetlib-offline"><Library size={30} /><h2>素材库等待启动</h2><p>请先运行本地执行器，图片原件、标签和内容项目才能安全保存。</p><code>npm run runner</code></section>;
   }
@@ -346,7 +366,7 @@ export default function MaterialCenter({ business, runnerOnline, runnerUrl, show
 
         {activeTags.length > 0 && <div className="assetlib-tag-filter">{data.tagGroups.map((group) => { const tags = activeTags.filter((tag) => tag.groupId === group.id); if (!tags.length) return null; return <div key={group.id}><span style={{ color: group.color }}>{group.name}</span><div>{tags.map((tag) => <button key={tag.id} className={activeTagIds.includes(tag.id) ? "active" : ""} onClick={() => setActiveTagIds((current) => current.includes(tag.id) ? current.filter((id) => id !== tag.id) : [...current, tag.id])}>#{tag.name}<small>{tag.assetCount}</small></button>)}</div></div>; })}{activeTagIds.length > 0 && <button className="assetlib-clear-filter" onClick={() => setActiveTagIds([])}><X size={12} />清空标签筛选</button>}</div>}
 
-        <div className={`assetlib-selection ${selectedIds.length ? "visible" : ""}`}><button onClick={toggleVisibleSelection}><span className={`assetlib-check ${allVisibleSelected ? "checked" : ""}`}>{allVisibleSelected && <Check size={11} />}</span>{allVisibleSelected ? "取消全选" : "全选当前结果"}</button><span>已选 <strong>{selectedIds.length}</strong> 张</span>{selectedIds.length > 0 && <><button onClick={() => setSelectedIds([])}><X size={12} />清空</button><button onClick={() => { setBatchTagIds([]); setBatchRole("keep"); setTagDialogOpen(true); }}><Tags size={13} />批量打标</button><button className="primary" onClick={() => addToProject(selectedIds)}><Plus size={13} />加入内容</button></>}</div>
+        <div className={`assetlib-selection ${selectedIds.length ? "visible" : ""}`}><button onClick={toggleVisibleSelection}><span className={`assetlib-check ${allVisibleSelected ? "checked" : ""}`}>{allVisibleSelected && <Check size={11} />}</span>{allVisibleSelected ? "取消全选" : "全选当前结果"}</button><span>已选 <strong>{selectedIds.length}</strong> 张</span>{selectedIds.length > 0 && <><button onClick={() => setSelectedIds([])}><X size={12} />清空</button><button onClick={() => { setBatchTagIds([]); setBatchRole("keep"); setTagDialogOpen(true); }}><Tags size={13} />批量打标</button><button disabled={exportingAssets} onClick={() => void exportSelectedAssets()}>{exportingAssets ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{exportingAssets ? "正在打包" : "一键导出 ZIP"}</button><button className="primary" onClick={() => addToProject(selectedIds)}><Plus size={13} />加入内容</button></>}</div>
 
         {loading ? <div className="assetlib-empty"><LoaderCircle className="spin" size={24} /><strong>正在读取素材库…</strong></div> : visibleAssets.length === 0 ? <div className="assetlib-empty"><Upload size={26} /><strong>{data.assets.length ? "没有符合条件的图片" : "素材库还是空的"}</strong><span>{data.assets.length ? "调整筛选条件，或清空标签筛选。" : "上传第一批图片，系统会自动查重并放入待整理区。"}</span>{!data.assets.length && <button className="primary-button" onClick={() => uploadInputRef.current?.click()}><Upload size={14} />上传第一批素材</button>}</div> : <div className="assetlib-grid">{visibleAssets.map((asset) => { const selected = selectedIds.includes(asset.id); return <article className={`assetlib-card ${selected ? "selected" : ""}`} key={asset.id}><button className={`assetlib-card-check ${selected ? "selected" : ""}`} aria-label={selected ? `取消选择 ${asset.name}` : `选择 ${asset.name}`} onClick={() => toggleSelection(asset.id)}>{selected && <Check size={13} />}</button><button className="assetlib-preview" onClick={() => setDetailId(asset.id)}><img src={`${runnerUrl}/api/library/assets/${asset.id}/thumbnail`} alt={asset.name} loading="lazy" /><span className={`assetlib-role ${asset.defaultRole}`}>{roleLabel(asset.defaultRole)}</span>{asset.usageCount > 0 && <span className="assetlib-used"><CheckCircle2 size={11} />用过 {asset.usageCount} 次</span>}</button><div className="assetlib-card-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.width && asset.height ? `${asset.width}×${asset.height} · ` : ""}{formatBytes(asset.size)}</span></div><div className="assetlib-card-tags">{asset.tagIds.slice(0, 3).map((tagId) => tagById.get(tagId)).filter(Boolean).map((tag) => <span key={tag!.id}>#{tag!.name}</span>)}{asset.tagIds.length > 3 && <small>+{asset.tagIds.length - 3}</small>}{!asset.tagIds.length && <em>尚未打标签</em>}</div><div className="assetlib-card-actions"><button onClick={() => setDetailId(asset.id)}>详情</button><button onClick={() => addToProject([asset.id])}><Plus size={12} />加入内容</button></div></article>; })}</div>}
 

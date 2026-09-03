@@ -18,8 +18,10 @@ test("uploads, deduplicates, labels, assembles, tracks usage, and exports images
   await library.ready();
 
   const first = await library.upload("客厅主图.png", pixelPng, "main");
+  const second = await library.upload("客厅次图.png", Buffer.concat([pixelPng, Buffer.from([0])]), "secondary");
   const duplicate = await library.upload("重复图片.png", pixelPng, "secondary");
   assert.equal(first.duplicate, false);
+  assert.equal(second.duplicate, false);
   assert.equal(duplicate.duplicate, true);
   assert.equal(first.asset.id, duplicate.asset.id);
 
@@ -29,16 +31,23 @@ test("uploads, deduplicates, labels, assembles, tracks usage, and exports images
   const project = await library.upsertProject({ title: "客厅避坑测试内容", business: "feed", status: "completed", assetIds: [first.asset.id] });
 
   const data = await library.data();
-  assert.equal(data.assets.length, 1);
-  assert.deepEqual(data.assets[0].tagIds, [tag.id]);
-  assert.equal(data.assets[0].defaultRole, "main");
-  assert.equal(data.assets[0].usageCount, 1);
-  assert.equal(data.assets[0].usages[0].title, "客厅避坑测试内容");
-  assert.equal(data.assets[0].usages[0].role, "main");
+  assert.equal(data.assets.length, 2);
+  const firstAsset = data.assets.find((asset) => asset.id === first.asset.id);
+  assert.deepEqual(firstAsset.tagIds, [tag.id]);
+  assert.equal(firstAsset.defaultRole, "main");
+  assert.equal(firstAsset.usageCount, 1);
+  assert.equal(firstAsset.usages[0].title, "客厅避坑测试内容");
+  assert.equal(firstAsset.usages[0].role, "main");
 
   const exported = await library.exportProject(project.id);
   assert.equal(exported.count, 1);
   const zip = await library.exportFile(exported.zipName);
   assert.ok(zip.size > 0);
   assert.match(zip.name, /客厅避坑测试内容/);
+
+  const selectedExport = await library.exportAssets([first.asset.id, second.asset.id]);
+  assert.equal(selectedExport.count, 2);
+  const selectedZip = await library.exportFile(selectedExport.zipName);
+  assert.ok(selectedZip.size > 0);
+  assert.match(selectedZip.name, /素材批量导出/);
 });

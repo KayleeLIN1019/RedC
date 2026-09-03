@@ -26,9 +26,10 @@ test("server-renders the Rednote operations workspace", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>红序｜小红书双业务运营与素材系统<\/title>/i);
+  assert.match(html, /<title>红序｜小红书个人 IP 运营与素材系统<\/title>/i);
   assert.match(html, />红序</);
-  assert.match(html, />信息流矩阵</);
+  assert.doesNotMatch(html, />信息流矩阵</);
+  assert.match(html, />独立业务</);
   assert.match(html, />个人 IP 运营</);
   assert.match(html, />素材中心</);
   assert.match(html, />图片设计</);
@@ -75,18 +76,22 @@ test("wires the persistent image library while retaining the Baidu cache service
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /id: "materials", label: "素材中心"/);
+  assert.match(page, /className={`standalone-feature/);
+  assert.match(page, /上传、打标、拼装与导出/);
+  assert.match(page, /\(\["ip"\] as BusinessId\[\]\)\.map/);
   assert.match(page, /<MaterialCenter/);
   assert.match(page, /addMaterialToDraft/);
   assert.match(materialCenter, /图片素材库/);
   assert.match(materialCenter, /上传图片/);
   assert.match(materialCenter, /批量打标/);
+  assert.match(materialCenter, /一键导出 ZIP/);
   assert.match(materialCenter, /满足全部标签/);
   assert.match(materialCenter, /内容拼装/);
   assert.match(materialCenter, /导出排序图片包/);
   assert.match(materialCenter, /使用记录/);
   assert.match(runner, /\/api\/library\/upload/);
   assert.match(runner, /\/api\/library\/assets\/update/);
+  assert.match(runner, /\/api\/library\/assets\/export/);
   assert.match(runner, /\/api\/library\/projects/);
   assert.match(runner, /\/api\/library\/exports/);
   assert.match(runner, /\/api\/materials\/baidu\/callback/);

@@ -750,6 +750,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/library/assets/export") {
+      const payload = await readJson(req);
+      const result = await materialLibrary.exportAssets(payload.ids);
+      send(res, 201, {
+        ok: true,
+        ...result,
+        downloadUrl: `/api/library/exports/${encodeURIComponent(result.zipName)}`,
+        message: `已将选中的 ${result.count} 张图片打包为 ZIP`,
+      }, origin);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/library/tag-groups") {
       const payload = await readJson(req);
       const group = await materialLibrary.createTagGroup(payload.name, payload.color);
