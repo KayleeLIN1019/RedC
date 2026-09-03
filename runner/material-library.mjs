@@ -291,11 +291,13 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     if (!ids.length) throw new Error("请至少选择一张图片");
     const addTagIds = (Array.isArray(payload.addTagIds) ? payload.addTagIds : []).filter((id) => state.tags.some((tag) => tag.id === id && tag.active !== false));
     const removeTagIds = new Set(Array.isArray(payload.removeTagIds) ? payload.removeTagIds : []);
+    const roleByAsset = payload.roleByAsset && typeof payload.roleByAsset === "object" ? payload.roleByAsset : {};
     const changed = [];
     for (const asset of state.assets) {
       if (!ids.includes(asset.id) || asset.archivedAt) continue;
       asset.tagIds = [...new Set([...(asset.tagIds || []).filter((id) => !removeTagIds.has(id)), ...addTagIds])];
-      if (["main", "secondary", "unspecified"].includes(payload.defaultRole)) asset.defaultRole = payload.defaultRole;
+      const requestedRole = roleByAsset[asset.id] || payload.defaultRole;
+      if (["main", "secondary", "unspecified"].includes(requestedRole)) asset.defaultRole = requestedRole;
       if (payload.note !== undefined && ids.length === 1) asset.note = cleanName(payload.note, "").slice(0, 300);
       if (payload.source !== undefined && ids.length === 1) asset.source = cleanName(payload.source, "本地上传");
       asset.updatedAt = now().toISOString();
@@ -327,7 +329,7 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     return project;
   }
 
-  async function exportProject(projectId) {
+  async function exportProject(projectId, format = "zip") {
     const project = state.projects.find((candidate) => candidate.id === projectId);
     if (!project) throw new Error("内容项目不存在");
     const timestamp = now().toISOString().replace(/[:.]/g, "-");
@@ -339,17 +341,26 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
       const relation = project.items[index];
       const asset = state.assets.find((candidate) => candidate.id === relation.assetId && !candidate.archivedAt);
       if (!asset) continue;
-      const extension = path.extname(asset.storedName).toLowerCase() || ".jpg";
       const roleName = index === 0 ? "主图" : "次图";
-      const outputName = `${String(index + 1).padStart(2, "0")}-${roleName}${extension}`;
+      const outputName = `${String(index + 1).padStart(2, "0")}-${roleName}-${safeFileName(asset.name)}`;
       await fs.copyFile(path.join(originalsDir, asset.storedName), path.join(targetDir, outputName));
       copied.push(outputName);
     }
     if (!copied.length) throw new Error("内容项目中没有可导出的图片");
+    if (format === "folder") return { folderPath: targetDir, count: copied.length, format: "folder" };
     const zipName = `${folderName}.zip`;
     const zipPath = path.join(exportsDir, zipName);
     await execFileAsync("/usr/bin/zip", ["-q", "-j", zipPath, ...copied.map((name) => path.join(targetDir, name))]);
-    return { zipName, folderPath: targetDir, count: copied.length };
+    return { zipName, folderPath: targetDir, count: copied.length, format: "zip" };
+  }
+
+  async function revealFolder(folderPath) {
+    const resolved = path.resolve(folderPath);
+    const exportRoot = `${path.resolve(exportsDir)}${path.sep}`;
+    if (!resolved.startsWith(exportRoot)) throw new Error("导出文件夹不正确");
+    const stats = await fs.stat(resolved);
+    if (!stats.isDirectory()) throw new Error("导出文件夹不存在");
+    await execFileAsync("/usr/bin/open", [resolved]);
   }
 
   async function exportAssets(assetIds) {
@@ -399,6 +410,7 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     updateAssets: (...args) => mutate(() => updateAssets(...args)),
     upsertProject: (...args) => mutate(() => upsertProject(...args)),
     exportProject,
+    revealFolder,
     exportAssets,
     exportFile,
   };

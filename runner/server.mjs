@@ -810,13 +810,15 @@ const server = http.createServer(async (req, res) => {
 
     const libraryExportMatch = url.pathname.match(/^\/api\/library\/projects\/([^/]+)\/export$/);
     if (req.method === "POST" && libraryExportMatch) {
-      await readJson(req);
-      const result = await materialLibrary.exportProject(libraryExportMatch[1]);
+      const payload = await readJson(req);
+      const format = payload.format === "folder" ? "folder" : "zip";
+      const result = await materialLibrary.exportProject(libraryExportMatch[1], format);
+      if (format === "folder") await materialLibrary.revealFolder(result.folderPath);
       send(res, 201, {
         ok: true,
         ...result,
-        downloadUrl: `/api/library/exports/${encodeURIComponent(result.zipName)}`,
-        message: `已按顺序导出 ${result.count} 张图片`,
+        ...(result.zipName ? { downloadUrl: `/api/library/exports/${encodeURIComponent(result.zipName)}` } : {}),
+        message: format === "folder" ? `已生成包含 ${result.count} 张图片的文件夹` : `已按顺序导出 ${result.count} 张图片`,
       }, origin);
       return;
     }

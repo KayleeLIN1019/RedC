@@ -27,8 +27,17 @@ test("uploads, deduplicates, labels, assembles, tracks usage, and exports images
 
   const group = await library.createTagGroup("测试空间", "#72917f");
   const tag = await library.createTag("客厅", group.id);
-  await library.updateAssets({ ids: [first.asset.id], addTagIds: [tag.id], defaultRole: "main" });
-  const project = await library.upsertProject({ title: "客厅避坑测试内容", business: "feed", status: "completed", assetIds: [first.asset.id] });
+  await library.updateAssets({
+    ids: [first.asset.id, second.asset.id],
+    addTagIds: [tag.id],
+    roleByAsset: { [first.asset.id]: "main", [second.asset.id]: "secondary" },
+  });
+  const project = await library.upsertProject({
+    title: "客厅避坑测试内容",
+    business: "feed",
+    status: "completed",
+    assetIds: [first.asset.id, second.asset.id],
+  });
 
   const data = await library.data();
   assert.equal(data.assets.length, 2);
@@ -38,12 +47,25 @@ test("uploads, deduplicates, labels, assembles, tracks usage, and exports images
   assert.equal(firstAsset.usageCount, 1);
   assert.equal(firstAsset.usages[0].title, "客厅避坑测试内容");
   assert.equal(firstAsset.usages[0].role, "main");
+  const secondAsset = data.assets.find((asset) => asset.id === second.asset.id);
+  assert.deepEqual(secondAsset.tagIds, [tag.id]);
+  assert.equal(secondAsset.defaultRole, "secondary");
+  assert.equal(secondAsset.usages[0].role, "secondary");
 
   const exported = await library.exportProject(project.id);
-  assert.equal(exported.count, 1);
+  assert.equal(exported.count, 2);
+  assert.equal(exported.format, "zip");
   const zip = await library.exportFile(exported.zipName);
   assert.ok(zip.size > 0);
   assert.match(zip.name, /客厅避坑测试内容/);
+
+  const folderExport = await library.exportProject(project.id, "folder");
+  assert.equal(folderExport.count, 2);
+  assert.equal(folderExport.format, "folder");
+  assert.deepEqual((await fs.readdir(folderExport.folderPath)).sort(), [
+    "01-主图-客厅主图.png",
+    "02-次图-客厅次图.png",
+  ]);
 
   const selectedExport = await library.exportAssets([first.asset.id, second.asset.id]);
   assert.equal(selectedExport.count, 2);
@@ -55,10 +77,11 @@ test("uploads, deduplicates, labels, assembles, tracks usage, and exports images
   assert.equal(renamedGroup.name, "客厅空间");
   const deletedGroup = await library.deleteTagGroup(group.id);
   assert.equal(deletedGroup.removedTags, 1);
-  assert.equal(deletedGroup.affectedAssets, 1);
+  assert.equal(deletedGroup.affectedAssets, 2);
   const dataAfterGroupDeletion = await library.data();
   assert.equal(dataAfterGroupDeletion.assets.length, 2);
   assert.equal(dataAfterGroupDeletion.tagGroups.some((candidate) => candidate.id === group.id), false);
   assert.equal(dataAfterGroupDeletion.tags.some((candidate) => candidate.id === tag.id), false);
   assert.deepEqual(dataAfterGroupDeletion.assets.find((asset) => asset.id === first.asset.id).tagIds, []);
+  assert.deepEqual(dataAfterGroupDeletion.assets.find((asset) => asset.id === second.asset.id).tagIds, []);
 });
