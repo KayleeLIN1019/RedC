@@ -664,9 +664,14 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .assetlib-group-grid > article { min-height: 150px; padding: 14px; border: 1px solid #e3e6ea; border-radius: 10px; }
 .assetlib-group-grid > article > header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .assetlib-group-grid header i { width: 9px; height: 30px; border-radius: 99px; }
-.assetlib-group-grid header div { display: grid; gap: 3px; }
+.assetlib-group-grid .assetlib-group-copy { display: grid; gap: 3px; }
 .assetlib-group-grid header strong { font-size: 10px; }
 .assetlib-group-grid header span { color: #9aa0a8; font-size: 7px; }
+.assetlib-group-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.assetlib-group-actions button { display: grid; width: 28px; height: 28px; place-items: center; color: #707b88; background: #f7f9fb; border: 1px solid #e3e7eb; border-radius: 6px; cursor: pointer; }
+.assetlib-group-actions button:hover { color: #4d5967; background: #eef2f5; }
+.assetlib-group-actions button.delete { color: #9a6268; background: #fff7f8; border-color: #eee0e2; }
+.assetlib-group-actions button:disabled { cursor: wait; opacity: .55; }
 .assetlib-group-grid article > div { display: grid; gap: 5px; }
 .assetlib-group-grid article > div button { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; padding: 0 9px; color: #687486; background: #f7f9fb; border: 1px solid #e7eaf0; border-radius: 6px; cursor: pointer; font-size: 8px; text-align: left; }
 .assetlib-group-grid article > div button:hover { background: #eef2f6; border-color: #d9dfe6; }

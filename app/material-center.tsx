@@ -12,11 +12,13 @@ import {
   Image as ImageIcon,
   Library,
   LoaderCircle,
+  PencilLine,
   Plus,
   RefreshCw,
   Save,
   Search,
   Tags,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -124,6 +126,7 @@ export default function MaterialCenter({ business, runnerOnline, runnerUrl, show
   const [newGroupName, setNewGroupName] = useState("");
   const [newTagName, setNewTagName] = useState("");
   const [newTagGroupId, setNewTagGroupId] = useState("");
+  const [busyGroupId, setBusyGroupId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
   const [projectAssetIds, setProjectAssetIds] = useState<string[]>([]);
@@ -264,6 +267,35 @@ export default function MaterialCenter({ business, runnerOnline, runnerUrl, show
     } catch (error) { showToast(error instanceof Error ? error.message : "标签创建失败"); }
   }
 
+  async function renameGroup(group: TagGroup) {
+    const name = window.prompt("新的标签组名称", group.name)?.trim();
+    if (!name || name === group.name) return;
+    setBusyGroupId(group.id);
+    try {
+      await requestJson(`/api/library/tag-groups/${group.id}/update`, { method: "POST", body: JSON.stringify({ name }) });
+      await loadLibrary();
+      showToast("标签组名称已更新");
+    } catch (error) { showToast(error instanceof Error ? error.message : "标签组修改失败"); }
+    finally { setBusyGroupId(""); }
+  }
+
+  async function deleteGroup(group: TagGroup) {
+    const groupTagIds = data.tags.filter((tag) => tag.groupId === group.id).map((tag) => tag.id);
+    const affectedAssets = data.assets.filter((asset) => asset.tagIds.some((id) => groupTagIds.includes(id))).length;
+    const confirmed = window.confirm(`确定删除标签组“${group.name}”吗？\n\n将同时删除其中 ${groupTagIds.length} 个标签，并从 ${affectedAssets} 张图片移除这些标签；图片素材本身不会被删除。`);
+    if (!confirmed) return;
+    setBusyGroupId(group.id);
+    try {
+      const result = await requestJson(`/api/library/tag-groups/${group.id}/delete`, { method: "POST", body: JSON.stringify({}) });
+      setActiveTagIds((current) => current.filter((id) => !groupTagIds.includes(id)));
+      setBatchTagIds((current) => current.filter((id) => !groupTagIds.includes(id)));
+      if (newTagGroupId === group.id) setNewTagGroupId(data.tagGroups.find((candidate) => candidate.id !== group.id)?.id || "");
+      await loadLibrary();
+      showToast(result.message || "标签组已删除，图片素材保持不变");
+    } catch (error) { showToast(error instanceof Error ? error.message : "标签组删除失败"); }
+    finally { setBusyGroupId(""); }
+  }
+
   async function renameTag(tag: MaterialTag) {
     const name = window.prompt("新的标签名称", tag.name)?.trim();
     if (!name || name === tag.name) return;
@@ -373,7 +405,7 @@ export default function MaterialCenter({ business, runnerOnline, runnerUrl, show
         {projectAssetIds.length > 0 && <div className="assetlib-assembly-dock"><div><FileStack size={17} /><span>拼装台已有 <strong>{projectAssetIds.length}</strong> 张图片</span></div><button onClick={() => setTab("projects")}>打开内容拼装台</button></div>}
       </>}
 
-      {tab === "tags" && <div className="assetlib-tag-admin"><div className="assetlib-tag-create"><div><h3>创建标签组</h3><p>标签组用于区分主题、空间、风格等维度。</p><label><input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder="例如：装修阶段" /><button disabled={!newGroupName.trim()} onClick={() => void createGroup()}><Plus size={13} />新增</button></label></div><div><h3>创建标签</h3><p>创建后即可用于单张或批量图片打标。</p><label><select value={effectiveTagGroupId} onChange={(event) => setNewTagGroupId(event.target.value)}>{data.tagGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select><input value={newTagName} onChange={(event) => setNewTagName(event.target.value)} placeholder="例如：客厅" /><button disabled={!newTagName.trim() || !effectiveTagGroupId} onClick={() => void createTag()}><Plus size={13} />新增</button></label></div></div><div className="assetlib-group-grid">{data.tagGroups.map((group) => { const groupTags = data.tags.filter((tag) => tag.groupId === group.id && tag.active !== false); return <article key={group.id}><header><i style={{ background: group.color }} /><div><strong>{group.name}</strong><span>{groupTags.length} 个标签</span></div></header>{groupTags.length ? <div>{groupTags.map((tag) => <button key={tag.id} onClick={() => void renameTag(tag)}><span>#{tag.name}</span><small>{tag.assetCount} 张 · 点击改名</small></button>)}</div> : <p>这个标签组还没有标签</p>}</article>; })}</div></div>}
+      {tab === "tags" && <div className="assetlib-tag-admin"><div className="assetlib-tag-create"><div><h3>创建标签组</h3><p>标签组用于区分主题、空间、风格等维度。</p><label><input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder="例如：装修阶段" /><button disabled={!newGroupName.trim()} onClick={() => void createGroup()}><Plus size={13} />新增</button></label></div><div><h3>创建标签</h3><p>创建后即可用于单张或批量图片打标。</p><label><select value={effectiveTagGroupId} onChange={(event) => setNewTagGroupId(event.target.value)}>{data.tagGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select><input value={newTagName} onChange={(event) => setNewTagName(event.target.value)} placeholder="例如：客厅" /><button disabled={!newTagName.trim() || !effectiveTagGroupId} onClick={() => void createTag()}><Plus size={13} />新增</button></label></div></div><div className="assetlib-group-grid">{data.tagGroups.map((group) => { const groupTags = data.tags.filter((tag) => tag.groupId === group.id && tag.active !== false); const busy = busyGroupId === group.id; return <article key={group.id}><header><i style={{ background: group.color }} /><div className="assetlib-group-copy"><strong>{group.name}</strong><span>{groupTags.length} 个标签</span></div><div className="assetlib-group-actions"><button aria-label={`编辑分组 ${group.name}`} title="编辑分组名称" disabled={busy} onClick={() => void renameGroup(group)}><PencilLine size={13} /></button><button className="delete" aria-label={`删除分组 ${group.name}`} title="删除分组" disabled={busy} onClick={() => void deleteGroup(group)}>{busy ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}</button></div></header>{groupTags.length ? <div>{groupTags.map((tag) => <button key={tag.id} onClick={() => void renameTag(tag)}><span>#{tag.name}</span><small>{tag.assetCount} 张 · 点击改名</small></button>)}</div> : <p>这个标签组还没有标签</p>}</article>; })}</div></div>}
 
       {tab === "projects" && <div className="assetlib-project-layout"><aside className="assetlib-project-list"><header><div><strong>内容项目</strong><span>{currentProjects.length} 个已保存项目</span></div><button aria-label="新建内容项目" onClick={startNewProject}><Plus size={15} /></button></header>{currentProjects.length === 0 && <p>还没有保存的内容项目。</p>}{currentProjects.map((project) => <button className={project.id === projectId ? "active" : ""} key={project.id} onClick={() => openProject(project)}><div><strong>{project.title}</strong><span>{project.items.length} 张图片 · {project.status === "completed" ? "已完成" : "草稿"}</span></div><small>{formatDate(project.updatedAt)}</small></button>)}</aside><main className="assetlib-builder"><header><div><span>{projectId ? "编辑内容项目" : "新建内容项目"}</span><input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="输入小红书内容标题" maxLength={80} /></div><div><select value={projectStatus} onChange={(event) => setProjectStatus(event.target.value as typeof projectStatus)}><option value="draft">草稿</option><option value="completed">已完成</option></select><button className="secondary-button" onClick={() => { setTab("library"); setSelectedIds([]); }}><Plus size={14} />继续选图</button><button className="primary-button" disabled={savingProject || !projectTitle.trim() || !projectAssetIds.length} onClick={() => void saveProject()}>{savingProject ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}保存项目</button></div></header><div className="assetlib-builder-note"><span>第 1 张自动作为主图，其余为次图。拖动卡片或使用箭头都可以重新排序。</span><strong>{projectAssetIds.length} 张</strong></div>{projectAssetIds.length === 0 ? <div className="assetlib-builder-empty"><ImageIcon size={28} /><strong>还没有选择图片</strong><span>返回素材库选择主图和次图，再加入拼装台。</span><button className="primary-button" onClick={() => setTab("library")}><Plus size={14} />去素材库选图</button></div> : <div className="assetlib-builder-grid">{projectAssetIds.map((assetId, index) => { const asset = assetById.get(assetId); if (!asset) return null; return <article key={assetId} draggable onDragStart={() => setDragIndex(index)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (dragIndex !== null) reorderProject(dragIndex, index); setDragIndex(null); }}><div className="assetlib-builder-index"><GripVertical size={14} /><strong>{String(index + 1).padStart(2, "0")}</strong><span>{index === 0 ? "主图" : "次图"}</span></div><img src={`${runnerUrl}/api/library/assets/${asset.id}/thumbnail`} alt={asset.name} /><div><strong title={asset.name}>{asset.name}</strong><span>{asset.tagIds.map((id) => tagById.get(id)?.name).filter(Boolean).slice(0, 3).join(" · ") || "未打标签"}</span></div><div className="assetlib-order-actions"><button aria-label={`上移 ${asset.name}`} disabled={index === 0} onClick={() => reorderProject(index, index - 1)}><ArrowUp size={13} /></button><button aria-label={`下移 ${asset.name}`} disabled={index === projectAssetIds.length - 1} onClick={() => reorderProject(index, index + 1)}><ArrowDown size={13} /></button><button aria-label={`从内容中移除 ${asset.name}`} onClick={() => setProjectAssetIds((current) => current.filter((id) => id !== assetId))}><X size={13} /></button></div></article>; })}</div>}<footer><div><CheckCircle2 size={14} /><span>保存后，每张图片的使用记录会自动更新。</span></div><button className="secondary-button" disabled={!projectId || !projectAssetIds.length} onClick={() => void exportProject()}><Download size={14} />导出排序图片包</button></footer></main></div>}
 

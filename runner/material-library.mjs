@@ -46,7 +46,7 @@ function normalizeState(value) {
   if (!value || typeof value !== "object") return base;
   return {
     version: 1,
-    tagGroups: Array.isArray(value.tagGroups) && value.tagGroups.length ? value.tagGroups : base.tagGroups,
+    tagGroups: Array.isArray(value.tagGroups) ? value.tagGroups : base.tagGroups,
     tags: Array.isArray(value.tags) ? value.tags : [],
     assets: Array.isArray(value.assets) ? value.assets : [],
     projects: Array.isArray(value.projects) ? value.projects.map((project) => ({
@@ -216,6 +216,42 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     return group;
   }
 
+  async function updateTagGroup(groupId, patch) {
+    const group = state.tagGroups.find((candidate) => candidate.id === groupId);
+    if (!group) throw new Error("标签组不存在");
+    if (patch.name !== undefined) {
+      const normalized = cleanName(patch.name, "");
+      if (!normalized) throw new Error("标签组名称不能为空");
+      if (state.tagGroups.some((candidate) => candidate.id !== groupId && candidate.name === normalized)) throw new Error("已经存在同名标签组");
+      group.name = normalized;
+    }
+    if (patch.color !== undefined) {
+      if (!/^#[0-9a-f]{6}$/i.test(patch.color)) throw new Error("标签组颜色格式不正确");
+      group.color = patch.color;
+    }
+    await save();
+    return group;
+  }
+
+  async function deleteTagGroup(groupId) {
+    const group = state.tagGroups.find((candidate) => candidate.id === groupId);
+    if (!group) throw new Error("标签组不存在");
+    const tagIds = new Set(state.tags.filter((tag) => tag.groupId === groupId).map((tag) => tag.id));
+    let affectedAssets = 0;
+    for (const asset of state.assets) {
+      const currentTagIds = asset.tagIds || [];
+      const nextTagIds = currentTagIds.filter((id) => !tagIds.has(id));
+      if (nextTagIds.length === currentTagIds.length) continue;
+      asset.tagIds = nextTagIds;
+      asset.updatedAt = now().toISOString();
+      affectedAssets += 1;
+    }
+    state.tags = state.tags.filter((tag) => tag.groupId !== groupId);
+    state.tagGroups = state.tagGroups.filter((candidate) => candidate.id !== groupId);
+    await save();
+    return { group, removedTags: tagIds.size, affectedAssets };
+  }
+
   async function createTag(name, groupId) {
     const normalized = cleanName(name, "");
     if (!normalized) throw new Error("标签名称不能为空");
@@ -356,6 +392,8 @@ export function createMaterialLibrary({ runnerDir, libraryDir: configuredLibrary
     upload: (...args) => mutate(() => upload(...args)),
     fileForAsset,
     createTagGroup: (...args) => mutate(() => createTagGroup(...args)),
+    updateTagGroup: (...args) => mutate(() => updateTagGroup(...args)),
+    deleteTagGroup: (...args) => mutate(() => deleteTagGroup(...args)),
     createTag: (...args) => mutate(() => createTag(...args)),
     updateTag: (...args) => mutate(() => updateTag(...args)),
     updateAssets: (...args) => mutate(() => updateAssets(...args)),

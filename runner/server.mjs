@@ -769,6 +769,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const libraryTagGroupUpdateMatch = url.pathname.match(/^\/api\/library\/tag-groups\/([^/]+)\/update$/);
+    if (req.method === "POST" && libraryTagGroupUpdateMatch) {
+      const group = await materialLibrary.updateTagGroup(libraryTagGroupUpdateMatch[1], await readJson(req));
+      send(res, 200, { ok: true, group, message: "标签组已更新" }, origin);
+      return;
+    }
+
+    const libraryTagGroupDeleteMatch = url.pathname.match(/^\/api\/library\/tag-groups\/([^/]+)\/delete$/);
+    if (req.method === "POST" && libraryTagGroupDeleteMatch) {
+      await readJson(req);
+      const result = await materialLibrary.deleteTagGroup(libraryTagGroupDeleteMatch[1]);
+      send(res, 200, {
+        ok: true,
+        ...result,
+        message: `已删除标签组及其中 ${result.removedTags} 个标签，图片素材保持不变`,
+      }, origin);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/library/tags") {
       const payload = await readJson(req);
       const tag = await materialLibrary.createTag(payload.name, payload.groupId);

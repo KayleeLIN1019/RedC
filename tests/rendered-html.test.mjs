@@ -84,6 +84,8 @@ test("wires the persistent image library while retaining the Baidu cache service
   assert.match(materialCenter, /图片素材库/);
   assert.match(materialCenter, /上传图片/);
   assert.match(materialCenter, /批量打标/);
+  assert.match(materialCenter, /编辑分组/);
+  assert.match(materialCenter, /删除分组/);
   assert.match(materialCenter, /一键导出 ZIP/);
   assert.match(materialCenter, /满足全部标签/);
   assert.match(materialCenter, /内容拼装/);
@@ -92,6 +94,8 @@ test("wires the persistent image library while retaining the Baidu cache service
   assert.match(runner, /\/api\/library\/upload/);
   assert.match(runner, /\/api\/library\/assets\/update/);
   assert.match(runner, /\/api\/library\/assets\/export/);
+  assert.match(runner, /libraryTagGroupUpdateMatch/);
+  assert.match(runner, /libraryTagGroupDeleteMatch/);
   assert.match(runner, /\/api\/library\/projects/);
   assert.match(runner, /\/api\/library\/exports/);
   assert.match(runner, /\/api\/materials\/baidu\/callback/);

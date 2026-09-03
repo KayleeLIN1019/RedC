@@ -50,4 +50,15 @@ test("uploads, deduplicates, labels, assembles, tracks usage, and exports images
   const selectedZip = await library.exportFile(selectedExport.zipName);
   assert.ok(selectedZip.size > 0);
   assert.match(selectedZip.name, /素材批量导出/);
+
+  const renamedGroup = await library.updateTagGroup(group.id, { name: "客厅空间" });
+  assert.equal(renamedGroup.name, "客厅空间");
+  const deletedGroup = await library.deleteTagGroup(group.id);
+  assert.equal(deletedGroup.removedTags, 1);
+  assert.equal(deletedGroup.affectedAssets, 1);
+  const dataAfterGroupDeletion = await library.data();
+  assert.equal(dataAfterGroupDeletion.assets.length, 2);
+  assert.equal(dataAfterGroupDeletion.tagGroups.some((candidate) => candidate.id === group.id), false);
+  assert.equal(dataAfterGroupDeletion.tags.some((candidate) => candidate.id === tag.id), false);
+  assert.deepEqual(dataAfterGroupDeletion.assets.find((asset) => asset.id === first.asset.id).tagIds, []);
 });
